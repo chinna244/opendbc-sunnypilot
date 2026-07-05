@@ -68,7 +68,7 @@ class CAR(Platforms):
   )
   MAZDA_CX9 = MazdaPlatformConfig(
     [MazdaCarDocs("Mazda CX-9 2016-20")],
-    MazdaCarSpecs(mass=4217 * CV.LB_TO_KG, wheelbase=3.1, steerRatio=17.6)
+    MazdaCarSpecs(mass=4217 * CV.LB_TO_KG, wheelbase=2.93, steerRatio=17.6)
   )
   MAZDA_3 = MazdaPlatformConfig(
     [MazdaCarDocs("Mazda 3 2017-18")],
@@ -80,7 +80,7 @@ class CAR(Platforms):
   )
   MAZDA_CX9_2021 = MazdaPlatformConfig(
     [MazdaCarDocs("Mazda CX-9 2021-23", video="https://youtu.be/dA3duO4a0O4")],
-    MAZDA_CX9.specs
+    MazdaCarSpecs(mass=4409 * CV.LB_TO_KG, wheelbase=2.93, steerRatio=17.6)
   )
   MAZDA_CX5_2022 = MazdaPlatformConfig(
     [MazdaCarDocs("Mazda CX-5 2022-25")],
@@ -92,6 +92,16 @@ class LKAS_LIMITS:
   STEER_THRESHOLD = 15
   DISABLE_SPEED = 45    # kph
   ENABLE_SPEED = 52     # kph
+
+
+# EPS firmware versions with steer-to-zero capability (2022+ CX-5 EPS). Matched against
+# car_fw rather than the fingerprinted platform so the same EPS swapped into another Mazda
+# keeps full-speed steering. Keep in sync with the CAR.MAZDA_CX5_2022 (Ecu.eps, 0x730) block
+# in fingerprints.py.
+STEER_TO_ZERO_EPS_FW = {
+  b'KBST-3210X-A-00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
+  b'KSD5-3210X-C-00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
+}
 
 
 class Buttons:
