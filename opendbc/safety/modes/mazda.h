@@ -26,85 +26,7 @@
 
 #define MAZDA_PARAM_LONGITUDINAL 1U
 
-// Stage 2: userspace may TX a sanitized CRZ_BTNS clone to the camera bus only when it
-// matches a recently received physical bus-0 source with TJA_BUTTON forced to 0.
-#define MAZDA_CRZ_BTNS_TJA_BIT 11U
-#define MAZDA_CRZ_BTNS_CLONE_QUEUE 8U
-#define MAZDA_CRZ_BTNS_CLONE_TIMEOUT_US 100000U  // 100 ms freshness window
-
 static bool mazda_longitudinal = false;
-
-static uint8_t mazda_crz_btns_src[MAZDA_CRZ_BTNS_CLONE_QUEUE][8];
-static uint32_t mazda_crz_btns_ts[MAZDA_CRZ_BTNS_CLONE_QUEUE];
-static uint8_t mazda_crz_btns_q_r = 0U;
-static uint8_t mazda_crz_btns_q_w = 0U;
-static uint8_t mazda_crz_btns_q_n = 0U;
-
-static void mazda_crz_btns_clone_reset(void) {
-  mazda_crz_btns_q_r = 0U;
-  mazda_crz_btns_q_w = 0U;
-  mazda_crz_btns_q_n = 0U;
-}
-
-static void mazda_crz_btns_clone_enqueue(const CANPacket_t *msg) {
-  // RX checks already require CRZ_BTNS length 8 before mazda_rx_hook runs.
-
-  // Drop oldest if full so the queue tracks the freshest physical frames.
-  if (mazda_crz_btns_q_n >= MAZDA_CRZ_BTNS_CLONE_QUEUE) {
-    mazda_crz_btns_q_r = (uint8_t)((mazda_crz_btns_q_r + 1U) % MAZDA_CRZ_BTNS_CLONE_QUEUE);
-    mazda_crz_btns_q_n--;
-  }
-
-  for (int i = 0; i < 8; i++) {
-    mazda_crz_btns_src[mazda_crz_btns_q_w][i] = msg->data[i];
-  }
-  mazda_crz_btns_ts[mazda_crz_btns_q_w] = microsecond_timer_get();
-  mazda_crz_btns_q_w = (uint8_t)((mazda_crz_btns_q_w + 1U) % MAZDA_CRZ_BTNS_CLONE_QUEUE);
-  mazda_crz_btns_q_n++;
-}
-
-static void mazda_crz_btns_clone_drop_stale(void) {
-  const uint32_t ts = microsecond_timer_get();
-  while (mazda_crz_btns_q_n > 0U) {
-    if (safety_get_ts_elapsed(ts, mazda_crz_btns_ts[mazda_crz_btns_q_r]) <= MAZDA_CRZ_BTNS_CLONE_TIMEOUT_US) {
-      break;
-    }
-    mazda_crz_btns_q_r = (uint8_t)((mazda_crz_btns_q_r + 1U) % MAZDA_CRZ_BTNS_CLONE_QUEUE);
-    mazda_crz_btns_q_n--;
-  }
-}
-
-// True iff msg equals src with only TJA_BUTTON cleared (all other bits identical, incl. CTR).
-static bool mazda_crz_btns_sanitized_match(const CANPacket_t *msg, const uint8_t *src) {
-  for (int i = 0; i < 8; i++) {
-    uint8_t expected = src[i];
-    if (i == (int)(MAZDA_CRZ_BTNS_TJA_BIT / 8U)) {
-      expected &= (uint8_t)~(1U << (MAZDA_CRZ_BTNS_TJA_BIT % 8U));
-    }
-    if (msg->data[i] != expected) {
-      return false;
-    }
-  }
-  return true;
-}
-
-static bool mazda_crz_btns_clone_tx_allowed(const CANPacket_t *msg) {
-  // Caller only invokes this for bus-2 CRZ_BTNS; TX whitelist already requires length 8.
-
-  mazda_crz_btns_clone_drop_stale();
-  if (mazda_crz_btns_q_n == 0U) {
-    return false;
-  }
-
-  if (!mazda_crz_btns_sanitized_match(msg, mazda_crz_btns_src[mazda_crz_btns_q_r])) {
-    return false;
-  }
-
-  // Consume exactly one source frame per accepted replacement.
-  mazda_crz_btns_q_r = (uint8_t)((mazda_crz_btns_q_r + 1U) % MAZDA_CRZ_BTNS_CLONE_QUEUE);
-  mazda_crz_btns_q_n--;
-  return true;
-}
 
 // With longitudinal control the stock radar is silenced and openpilot replays its frames,
 // so allowed tx patterns are pinned to byte-exact stock captures wherever possible.
@@ -209,12 +131,6 @@ static void mazda_rx_hook(const CANPacket_t *msg) {
       }
       brake_pressed = brake;
     }
-
-    // Capture physical CRZ_BTNS for the bus-2 sanitized-clone TX check. Bus-0 openpilot
-    // synthesized button commands must not satisfy this path (they are TX, not RX).
-    if (msg->addr == MAZDA_CRZ_BTNS) {
-      mazda_crz_btns_clone_enqueue(msg);
-    }
   }
 }
 
@@ -300,20 +216,12 @@ static bool mazda_tx_hook(const CANPacket_t *msg) {
     }
   }
 
-  // cruise buttons check (existing bus-0 synthesized cancel/resume path)
+  // cruise buttons check
   if (main_bus && (msg->addr == MAZDA_CRZ_BTNS)) {
     // allow resume spamming while controls allowed, but
     // only allow cancel while controls not allowed
     bool cancel_cmd = (msg->data[0] == 0x1U);
     if (!controls_allowed && !cancel_cmd) {
-      tx = false;
-    }
-  }
-
-  // Stage 2: bus-2 CRZ_BTNS must be an exact sanitized clone of a fresh physical source.
-  // Existing bus-0 button TX permission above must not satisfy or bypass this validator.
-  if ((msg->bus == (unsigned char)MAZDA_CAM) && (msg->addr == MAZDA_CRZ_BTNS)) {
-    if (!mazda_crz_btns_clone_tx_allowed(msg)) {
       tx = false;
     }
   }
@@ -332,14 +240,12 @@ static safety_config mazda_init(uint16_t param) {
   static const CanMsg MAZDA_TX_MSGS[] = {
     {MAZDA_LKAS, 0, 8, .check_relay = true},
     {MAZDA_CRZ_BTNS, 0, 8, .check_relay = false},
-    {MAZDA_CRZ_BTNS, MAZDA_CAM, 8, .check_relay = false},
     {MAZDA_LKAS_HUD, 0, 8, .check_relay = true},
   };
 
   static const CanMsg MAZDA_LONG_TX_MSGS[] = {
     {MAZDA_LKAS, 0, 8, .check_relay = true},
     {MAZDA_CRZ_BTNS, 0, 8, .check_relay = false},
-    {MAZDA_CRZ_BTNS, MAZDA_CAM, 8, .check_relay = false},
     {MAZDA_LKAS_HUD, 0, 8, .check_relay = true},
     {MAZDA_CRZ_INFO, 0, 8, .check_relay = false},
     {MAZDA_CRZ_CTRL, 0, 8, .check_relay = false},
@@ -380,7 +286,6 @@ static safety_config mazda_init(uint16_t param) {
 
   mazda_longitudinal = GET_FLAG(param, MAZDA_PARAM_LONGITUDINAL);
   acc_main_on = false;
-  mazda_crz_btns_clone_reset();
 
   return mazda_longitudinal ? BUILD_SAFETY_CFG(mazda_long_rx_checks, MAZDA_LONG_TX_MSGS) :
                               BUILD_SAFETY_CFG(mazda_rx_checks, MAZDA_TX_MSGS);
