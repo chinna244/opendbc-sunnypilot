@@ -21,6 +21,7 @@ class CarState(CarStateBase, CarStateExt):
     self.shifter_values = can_define.dv["GEAR"]["GEAR"]
 
     self.crz_btns_counter = 0
+    self.crz_btns_raw_payloads: list[bytes] = []
     self.acc_active_last = False
     self.lkas_allowed_speed = False
 
