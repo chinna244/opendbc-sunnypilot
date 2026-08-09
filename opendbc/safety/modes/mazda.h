@@ -229,6 +229,13 @@ static bool mazda_tx_hook(const CANPacket_t *msg) {
   return tx;
 }
 
+// Block CRZ_BTNS (0x09D) bus 0 -> bus 2 so the FSC never sees physical TJA presses.
+// openpilot still receives the original bus-0 RX for ButtonType.lkas / MADS.
+// Stage 1 blocks the whole address (not payload-selective); bus 2 -> bus 0 is unchanged.
+static bool mazda_fwd_hook(int bus_num, int addr) {
+  return (bus_num == MAZDA_MAIN) && (addr == (int)MAZDA_CRZ_BTNS);
+}
+
 static safety_config mazda_init(uint16_t param) {
   static const CanMsg MAZDA_TX_MSGS[] = {
     {MAZDA_LKAS, 0, 8, .check_relay = true},
@@ -288,4 +295,5 @@ const safety_hooks mazda_hooks = {
   .init = mazda_init,
   .rx = mazda_rx_hook,
   .tx = mazda_tx_hook,
+  .fwd = mazda_fwd_hook,
 };
