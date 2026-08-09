@@ -13,8 +13,7 @@ class TestMazdaSafety(common.CarSafetyTest, common.DriverTorqueSteeringSafetyTes
   TX_MSGS = [[0x243, 0], [0x09d, 0], [0x440, 0]]
   STANDSTILL_THRESHOLD = .1
   RELAY_MALFUNCTION_ADDRS = {0: (0x243, 0x440)}
-  # Block stock LKAS/HUD camera->car, and CRZ_BTNS car->camera (TJA FSC isolation).
-  FWD_BLACKLISTED_ADDRS = {2: [0x243, 0x440], 0: [0x09d]}
+  FWD_BLACKLISTED_ADDRS = {2: [0x243, 0x440]}
 
   MAX_RATE_UP = 12
   MAX_RATE_DOWN = 25
@@ -81,15 +80,6 @@ class TestMazdaSafety(common.CarSafetyTest, common.DriverTorqueSteeringSafetyTes
     self.safety.set_controls_allowed(1)
     self.assertTrue(self._tx(self._button_msg(cancel=True)))
     self.assertTrue(self._tx(self._button_msg(resume=True)))
-
-  def test_crz_btns_fsc_isolation(self):
-    # Stage 1: block all CRZ_BTNS bus 0 -> bus 2; preserve other Mazda forwarding.
-    representative_addr = 0x202  # ENGINE_DATA
-
-    self.assertEqual(-1, self.safety.safety_fwd_hook(0, 0x09d))
-    self.assertEqual(2, self.safety.safety_fwd_hook(0, representative_addr))
-    self.assertEqual(0, self.safety.safety_fwd_hook(2, 0x09d))
-    self.assertEqual(0, self.safety.safety_fwd_hook(2, representative_addr))
 
 
 class TestMazdaLongitudinalSafety(TestMazdaSafety, common.LongitudinalAccelSafetyTest):
