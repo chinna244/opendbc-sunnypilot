@@ -1,7 +1,7 @@
 import numpy as np
 
 from opendbc.can import CANPacker
-from opendbc.car import Bus, DT_CTRL, make_tester_present_msg, rate_limit, structs, uds
+from opendbc.car import Bus, make_tester_present_msg, rate_limit, structs, uds
 from opendbc.car.lateral import apply_driver_steer_torque_limits
 from opendbc.car.interfaces import CarControllerBase
 from opendbc.car.mazda import mazdacan
@@ -37,8 +37,8 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
   def update(self, CC, CC_SP, CS, now_nanos):
     can_sends = []
 
-    # Stage 2: restore continuous CRZ_BTNS to the FSC as exact sanitized clones.
-    # Original physical 0x09D remains blocked bus0->bus2 by panda; only TJA is cleared.
+    # Restore continuous CRZ_BTNS to the FSC as exact sanitized clones. Original physical
+    # 0x09D remains blocked bus0->bus2 by panda; physical TJA is represented as MRCC to the FSC.
     for dat in CS.crz_btns_raw_payloads:
       can_sends.append(mazdacan.create_sanitized_crz_btns_clone(dat, bus=2))
     CS.crz_btns_raw_payloads = []

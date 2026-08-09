@@ -92,9 +92,12 @@ class TestMazdaSafety(common.CarSafetyTest, common.DriverTorqueSteeringSafetyTes
     self.assertEqual(0, self.safety.safety_fwd_hook(2, representative_addr))
 
   @staticmethod
-  def _sanitize_crz_btns(dat: bytes) -> bytes:
+  def _fsc_crz_btns(dat: bytes) -> bytes:
     out = bytearray(dat)
+    tja_pressed = bool(out[1] & 0x08)
     out[1] &= ~0x08  # TJA_BUTTON bit 11
+    if tja_pressed:
+      out[1] |= 0x80  # MRCC_BUTTON bit 15
     return bytes(out)
 
   def _rx_crz_btns(self, dat: bytes):
@@ -115,26 +118,45 @@ class TestMazdaSafety(common.CarSafetyTest, common.DriverTorqueSteeringSafetyTes
     distance = bytes.fromhex("8001ffffffffff0a")
 
     # 1. Reject before any physical source frame.
-    self.assertFalse(self._tx_crz_btns_cam(self._sanitize_crz_btns(idle)))
+    self.assertFalse(self._tx_crz_btns_cam(self._fsc_crz_btns(idle)))
 
     # 2. Exact sanitized clone accepted.
     self.assertTrue(self._rx_crz_btns(idle))
-    self.assertTrue(self._tx_crz_btns_cam(self._sanitize_crz_btns(idle)))
+    self.assertTrue(self._tx_crz_btns_cam(self._fsc_crz_btns(idle)))
 
-    # 3. Unchanged TJA=1 clone rejected.
+    # 3. Physical TJA must be represented as MRCC. Both the old Stage-2 representation
+    # and unchanged TJA=1 are rejected without consuming the source authorization.
     self.assertTrue(self._rx_crz_btns(tja))
+    old_stage2 = bytearray(tja)
+    old_stage2[1] &= ~0x08
+    self.assertFalse(self._tx_crz_btns_cam(bytes(old_stage2)))
     self.assertFalse(self._tx_crz_btns_cam(tja))
-    # Matching sanitized clone still works after the rejected attempt (source not consumed).
-    self.assertTrue(self._tx_crz_btns_cam(self._sanitize_crz_btns(tja)))
+    coherent_tja = self._fsc_crz_btns(tja)
+    self.assertEqual(bytes.fromhex("0081ffffffffff04"), coherent_tja)
+    self.assertTrue(self._tx_crz_btns_cam(coherent_tja))
+
+    # 4. Arbitrary MRCC injection is not authorized by an idle physical source.
+    self.assertTrue(self._rx_crz_btns(idle))
+    injected_mrcc = bytearray(idle)
+    injected_mrcc[1] |= 0x80
+    self.assertFalse(self._tx_crz_btns_cam(bytes(injected_mrcc)))
+    self.assertTrue(self._tx_crz_btns_cam(self._fsc_crz_btns(idle)))
+
+    # 5. A real physical MRCC remains MRCC, and physical TJA+MRCC remains MRCC.
+    self.assertTrue(self._rx_crz_btns(mrcc))
+    self.assertTrue(self._tx_crz_btns_cam(self._fsc_crz_btns(mrcc)))
+    tja_mrcc = bytes.fromhex("0089ffffffffff0b")
+    self.assertTrue(self._rx_crz_btns(tja_mrcc))
+    self.assertTrue(self._tx_crz_btns_cam(self._fsc_crz_btns(tja_mrcc)))
 
     def assert_altered_rejected(src: bytes, mutator):
       self.assertTrue(self._rx_crz_btns(src))
-      bad = bytearray(self._sanitize_crz_btns(src))
+      bad = bytearray(self._fsc_crz_btns(src))
       mutator(bad)
       self.assertFalse(self._tx_crz_btns_cam(bytes(bad)))
-      self.assertTrue(self._tx_crz_btns_cam(self._sanitize_crz_btns(src)))
+      self.assertTrue(self._tx_crz_btns_cam(self._fsc_crz_btns(src)))
 
-    # 4-10. Altered button / CTR bits rejected.
+    # 6-12. Altered button / CTR bits rejected.
     assert_altered_rejected(cancel, lambda d: d.__setitem__(0, d[0] ^ 0x01))
     assert_altered_rejected(resume, lambda d: d.__setitem__(0, d[0] ^ 0x04))
     assert_altered_rejected(set_p, lambda d: d.__setitem__(0, d[0] ^ 0x10))
@@ -143,42 +165,42 @@ class TestMazdaSafety(common.CarSafetyTest, common.DriverTorqueSteeringSafetyTes
     assert_altered_rejected(distance, lambda d: d.__setitem__(0, d[0] ^ 0x80))
     assert_altered_rejected(idle, lambda d: d.__setitem__(3, (d[3] & 0xC0) | ((((d[3] >> 2) + 1) & 0x0F) << 2)))
 
-    # 11. Alteration of an otherwise-unrelated / undefined payload bit rejected.
+    # 13. Alteration of an otherwise-unrelated / undefined payload bit rejected.
     assert_altered_rejected(idle, lambda d: d.__setitem__(5, d[5] ^ 0x01))
 
-    # 12. Duplicate replacement for same physical source rejected.
+    # 14. Duplicate replacement for same physical source rejected.
     self.assertTrue(self._rx_crz_btns(idle))
-    good = self._sanitize_crz_btns(idle)
+    good = self._fsc_crz_btns(idle)
     self.assertTrue(self._tx_crz_btns_cam(good))
     self.assertFalse(self._tx_crz_btns_cam(good))
 
-    # 13. Stale replacement rejected.
+    # 15. Stale replacement rejected.
     self.safety.set_timer(0)
     self.assertTrue(self._rx_crz_btns(tja))
     self.safety.set_timer(100000 + 1)  # MAZDA_CRZ_BTNS_CLONE_TIMEOUT_US
-    self.assertFalse(self._tx_crz_btns_cam(self._sanitize_crz_btns(tja)))
+    self.assertFalse(self._tx_crz_btns_cam(self._fsc_crz_btns(tja)))
 
-    # 14. Next physical source permits exactly one next replacement.
+    # 16. Next physical source permits exactly one next replacement.
     self.safety.set_timer(200000)
     self.assertTrue(self._rx_crz_btns(mrcc))
-    self.assertTrue(self._tx_crz_btns_cam(self._sanitize_crz_btns(mrcc)))
-    self.assertFalse(self._tx_crz_btns_cam(self._sanitize_crz_btns(mrcc)))
+    self.assertTrue(self._tx_crz_btns_cam(self._fsc_crz_btns(mrcc)))
+    self.assertFalse(self._tx_crz_btns_cam(self._fsc_crz_btns(mrcc)))
 
   def test_bus0_button_commands_isolated_from_clone_permission(self):
     # 15. Existing Mazda bus-0 synthesized button commands retain existing behavior and
     # do not satisfy / bypass the bus-2 clone validator.
     self.safety.set_controls_allowed(0)
     self.assertTrue(self._tx(self._button_msg(cancel=True)))
-    self.assertFalse(self._tx_crz_btns_cam(self._sanitize_crz_btns(bytes.fromhex("0101ffffffffff00"))))
+    self.assertFalse(self._tx_crz_btns_cam(self._fsc_crz_btns(bytes.fromhex("0101ffffffffff00"))))
 
     self.safety.set_controls_allowed(1)
     self.assertTrue(self._tx(self._button_msg(resume=True)))
-    self.assertFalse(self._tx_crz_btns_cam(self._sanitize_crz_btns(bytes.fromhex("0401ffffffffff00"))))
+    self.assertFalse(self._tx_crz_btns_cam(self._fsc_crz_btns(bytes.fromhex("0401ffffffffff00"))))
 
     # Physical RX still required for a valid bus-2 clone.
     src = bytes.fromhex("0001ffffffffff0b")
     self.assertTrue(self._rx_crz_btns(src))
-    self.assertTrue(self._tx_crz_btns_cam(self._sanitize_crz_btns(src)))
+    self.assertTrue(self._tx_crz_btns_cam(self._fsc_crz_btns(src)))
 
   @staticmethod
   def _crz_btns_with_ctr(base: bytes, ctr: int) -> bytes:
@@ -192,7 +214,7 @@ class TestMazdaSafety(common.CarSafetyTest, common.DriverTorqueSteeringSafetyTes
     self.safety.set_controls_allowed(False)
     src = bytes.fromhex("0009ffffffffff0c")
     self.assertTrue(self._rx_crz_btns(src))
-    self.assertTrue(self._tx_crz_btns_cam(self._sanitize_crz_btns(src)))
+    self.assertTrue(self._tx_crz_btns_cam(self._fsc_crz_btns(src)))
 
     # Existing bus-0 synthesized button rules remain unchanged.
     self.assertTrue(self._tx(self._button_msg(cancel=True)))
@@ -202,7 +224,7 @@ class TestMazdaSafety(common.CarSafetyTest, common.DriverTorqueSteeringSafetyTes
     src = bytes.fromhex("0001ffffffffff0d")
     self.assertTrue(self._rx_crz_btns(src))
     self._reset_safety_hooks()
-    self.assertFalse(self._tx_crz_btns_cam(self._sanitize_crz_btns(src)))
+    self.assertFalse(self._tx_crz_btns_cam(self._fsc_crz_btns(src)))
 
   def test_clone_queue_overflow_and_stale_recovery(self):
     # Fill beyond the 8-entry queue with no clones emitted, then let them go stale.
@@ -215,13 +237,13 @@ class TestMazdaSafety(common.CarSafetyTest, common.DriverTorqueSteeringSafetyTes
 
     self.safety.set_timer(100000 + 1)
     for src in overflow_srcs:
-      self.assertFalse(self._tx_crz_btns_cam(self._sanitize_crz_btns(src)))
+      self.assertFalse(self._tx_crz_btns_cam(self._fsc_crz_btns(src)))
 
     # One fresh physical source after the delay must authorize exactly its clone.
     fresh = self._crz_btns_with_ctr(bytes.fromhex("0009ffffffffff00"), 11)
     self.assertTrue(self._rx_crz_btns(fresh))
-    self.assertTrue(self._tx_crz_btns_cam(self._sanitize_crz_btns(fresh)))
-    self.assertFalse(self._tx_crz_btns_cam(self._sanitize_crz_btns(fresh)))
+    self.assertTrue(self._tx_crz_btns_cam(self._fsc_crz_btns(fresh)))
+    self.assertFalse(self._tx_crz_btns_cam(self._fsc_crz_btns(fresh)))
 
   def test_stale_head_does_not_block_fresh_clone(self):
     self.safety.set_timer(0)
@@ -233,25 +255,25 @@ class TestMazdaSafety(common.CarSafetyTest, common.DriverTorqueSteeringSafetyTes
     self.assertTrue(self._rx_crz_btns(fresh))
 
     # Stale head must be discarded so the fresh clone can pass.
-    self.assertFalse(self._tx_crz_btns_cam(self._sanitize_crz_btns(stale)))
-    self.assertTrue(self._tx_crz_btns_cam(self._sanitize_crz_btns(fresh)))
+    self.assertFalse(self._tx_crz_btns_cam(self._fsc_crz_btns(stale)))
+    self.assertTrue(self._tx_crz_btns_cam(self._fsc_crz_btns(fresh)))
 
   def test_consumed_source_not_reused_after_ctr_wrap_payload(self):
     # Consumed authorization must not revive just because CTR wrapped to the same payload.
     self.safety.set_timer(0)
     src = self._crz_btns_with_ctr(bytes.fromhex("0001ffffffffff00"), 0)
     self.assertTrue(self._rx_crz_btns(src))
-    self.assertTrue(self._tx_crz_btns_cam(self._sanitize_crz_btns(src)))
+    self.assertTrue(self._tx_crz_btns_cam(self._fsc_crz_btns(src)))
 
     # Same bytes again with no new physical RX: reject even inside the freshness window.
     self.safety.set_timer(1000)
-    self.assertFalse(self._tx_crz_btns_cam(self._sanitize_crz_btns(src)))
+    self.assertFalse(self._tx_crz_btns_cam(self._fsc_crz_btns(src)))
 
     # A later physical frame that reuses CTR=0 is a new source and authorizes once.
     wrapped = self._crz_btns_with_ctr(bytes.fromhex("0001ffffffffff00"), 0)
     self.assertTrue(self._rx_crz_btns(wrapped))
-    self.assertTrue(self._tx_crz_btns_cam(self._sanitize_crz_btns(wrapped)))
-    self.assertFalse(self._tx_crz_btns_cam(self._sanitize_crz_btns(wrapped)))
+    self.assertTrue(self._tx_crz_btns_cam(self._fsc_crz_btns(wrapped)))
+    self.assertFalse(self._tx_crz_btns_cam(self._fsc_crz_btns(wrapped)))
 
   def test_host_bus0_tx_cannot_authorize_bus2_clone(self):
     # Only mazda_rx_hook bus-0 RX may enqueue clone authorization; host TX must not.
@@ -265,7 +287,7 @@ class TestMazdaSafety(common.CarSafetyTest, common.DriverTorqueSteeringSafetyTes
       "RES": 1,
       "RES_INV": 0,
     })[1]
-    self.assertFalse(self._tx_crz_btns_cam(self._sanitize_crz_btns(bytes(resume_dat))))
+    self.assertFalse(self._tx_crz_btns_cam(self._fsc_crz_btns(bytes(resume_dat))))
 
 
 class TestMazdaLongitudinalSafety(TestMazdaSafety, common.LongitudinalAccelSafetyTest):

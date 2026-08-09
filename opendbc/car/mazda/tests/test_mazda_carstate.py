@@ -67,34 +67,32 @@ def test_legacy_main_button_press_release_unchanged():
 
 
 @pytest.mark.parametrize(
-  ("src_hex", "expect_tja_cleared"),
+  ("src_hex", "expected_hex"),
   [
-    ("0001ffffffffff03", False),  # idle / TJA already 0
-    ("0009ffffffffff04", True),   # TJA press
-    ("0081ffffffffff05", False),  # MRCC
-    ("0101ffffffffff06", False),  # CANCEL
-    ("0401ffffffffff07", False),  # RESUME
-    ("1001ffffffffff08", False),  # SET+
-    ("2001ffffffffff09", False),  # SET-
-    ("8001ffffffffff0a", False),  # distance
+    ("0001ffffffffff03", "0001ffffffffff03"),  # idle
+    ("0009ffffffffff04", "0081ffffffffff04"),  # physical TJA -> FSC MRCC
+    ("0081ffffffffff05", "0081ffffffffff05"),  # physical MRCC unchanged
+    ("0089ffffffffff06", "0081ffffffffff06"),  # physical TJA+MRCC -> FSC MRCC
+    ("0101ffffffffff07", "0101ffffffffff07"),  # CANCEL
+    ("0401ffffffffff08", "0401ffffffffff08"),  # RESUME
+    ("1001ffffffffff09", "1001ffffffffff09"),  # SET+
+    ("2001ffffffffff0a", "2001ffffffffff0a"),  # SET-
+    ("8001ffffffffff0b", "8001ffffffffff0b"),  # distance
   ],
 )
-def test_sanitized_crz_btns_clone_preserves_source(src_hex, expect_tja_cleared):
+def test_sanitized_crz_btns_clone_preserves_source(src_hex, expected_hex):
   src = bytes.fromhex(src_hex)
   clone = mazdacan.create_sanitized_crz_btns_clone(src, bus=2)
   assert clone.address == 0x9D
   assert clone.src == 2
+  assert clone.dat == bytes.fromhex(expected_hex)
   assert clone.dat[1] & 0x08 == 0
-  expected = bytearray(src)
-  expected[1] &= ~0x08
-  assert clone.dat == bytes(expected)
-  if expect_tja_cleared:
-    assert src[1] & 0x08
-  # CTR nibble and every non-TJA bit identical
+  assert bool(clone.dat[1] & 0x80) == bool(src[1] & 0x80 or src[1] & 0x08)
+  # CTR nibble and every bit outside TJA/MRCC remain identical.
   assert (clone.dat[3] >> 2) & 0x0F == (src[3] >> 2) & 0x0F
   for i, (a, b) in enumerate(zip(src, clone.dat, strict=True)):
     if i == 1:
-      assert (a & ~0x08) == b
+      assert (a & ~0x88) == (b & ~0x88)
     else:
       assert a == b
 
@@ -113,7 +111,7 @@ def test_interface_captures_raw_and_controller_emits_bus2_clone():
   _, can_sends = CI.apply(CC, CC_SP, now_nanos=0)
   clones = [m for m in can_sends if m[0] == 0x9D and m[2] == 2]
   assert len(clones) == 1
-  assert clones[0][1] == bytes.fromhex("0001ffffffffff0c")
+  assert clones[0][1] == bytes.fromhex("0081ffffffffff0c")
   assert CI.CS.crz_btns_raw_payloads == []
 
   # TX echoes / non-bus0 frames must not be treated as physical sources.

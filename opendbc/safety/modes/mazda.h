@@ -26,9 +26,10 @@
 
 #define MAZDA_PARAM_LONGITUDINAL 1U
 
-// Stage 2: userspace may TX a sanitized CRZ_BTNS clone to the camera bus only when it
-// matches a recently received physical bus-0 source with TJA_BUTTON forced to 0.
+// Stage 5B: userspace may TX a sanitized CRZ_BTNS clone to the camera bus only when it
+// matches a recently received physical bus-0 source with TJA_BUTTON represented as MRCC.
 #define MAZDA_CRZ_BTNS_TJA_BIT 11U
+#define MAZDA_CRZ_BTNS_MRCC_BIT 15U
 #define MAZDA_CRZ_BTNS_CLONE_QUEUE 8U
 #define MAZDA_CRZ_BTNS_CLONE_TIMEOUT_US 100000U  // 100 ms freshness window
 
@@ -74,12 +75,18 @@ static void mazda_crz_btns_clone_drop_stale(void) {
   }
 }
 
-// True iff msg equals src with only TJA_BUTTON cleared (all other bits identical, incl. CTR).
+// True only when msg equals src with TJA_BUTTON cleared and, only for a physical TJA source,
+// MRCC_BUTTON set. All other bits must remain identical, including CTR and undefined bits.
 static bool mazda_crz_btns_sanitized_match(const CANPacket_t *msg, const uint8_t *src) {
+  const bool tja_pressed = (src[MAZDA_CRZ_BTNS_TJA_BIT / 8U] &
+                            (1U << (MAZDA_CRZ_BTNS_TJA_BIT % 8U))) != 0U;
   for (int i = 0; i < 8; i++) {
     uint8_t expected = src[i];
     if (i == (int)(MAZDA_CRZ_BTNS_TJA_BIT / 8U)) {
       expected &= (uint8_t)~(1U << (MAZDA_CRZ_BTNS_TJA_BIT % 8U));
+    }
+    if (tja_pressed && (i == (int)(MAZDA_CRZ_BTNS_MRCC_BIT / 8U))) {
+      expected |= (uint8_t)(1U << (MAZDA_CRZ_BTNS_MRCC_BIT % 8U));
     }
     if (msg->data[i] != expected) {
       return false;
@@ -310,7 +317,8 @@ static bool mazda_tx_hook(const CANPacket_t *msg) {
     }
   }
 
-  // Stage 2: bus-2 CRZ_BTNS must be an exact sanitized clone of a fresh physical source.
+  // Stage 5B: bus-2 CRZ_BTNS must be an exact sanitized clone of a fresh physical source,
+  // with physical TJA represented as MRCC for FSC state coherence.
   // Existing bus-0 button TX permission above must not satisfy or bypass this validator.
   if ((msg->bus == (unsigned char)MAZDA_CAM) && (msg->addr == MAZDA_CRZ_BTNS)) {
     if (!mazda_crz_btns_clone_tx_allowed(msg)) {
