@@ -76,22 +76,26 @@ class TestMazdaSafety(common.CarSafetyTest, common.DriverTorqueSteeringSafetyTes
     self.safety.set_mads_params(enable_mads, False, False)
     self.safety.set_heartbeat_engaged_mads(True)
 
-  def _clear_lateral_with_heartbeat(self):
+  def _clear_lateral_with_heartbeat(self, expected_acc_main):
     self.safety.set_heartbeat_engaged_mads(False)
     for _ in range(3):
       self.safety.mads_heartbeat_engaged_check()
     self.assertFalse(self.safety.get_controls_allowed_lateral())
-    self.assertTrue(self.safety.get_acc_main_on())
+    self.assertEqual(expected_acc_main, self.safety.get_acc_main_on())
 
   def _route27_cleared_state(self, tja_flag=True):
     self._configure_tja_mads(tja_flag=tja_flag)
-    self.assertTrue(self._rx(self._acc_main_msg(True)))
+    if tja_flag:
+      self.assertTrue(self._rx(self._tja_button_msg(False)))
+      self.assertTrue(self._rx(self._tja_button_msg(True)))
+    else:
+      self.assertTrue(self._rx(self._acc_main_msg(True)))
     self.assertTrue(self.safety.get_controls_allowed_lateral())
-    self._clear_lateral_with_heartbeat()
+    self._clear_lateral_with_heartbeat(expected_acc_main=not tja_flag)
     self.safety.set_heartbeat_engaged_mads(True)
     self.safety.mads_heartbeat_engaged_check()
     self.assertFalse(self.safety.get_controls_allowed_lateral())
-    self.assertTrue(self.safety.get_acc_main_on())
+    self.assertEqual(not tja_flag, self.safety.get_acc_main_on())
 
   def test_tja_flag_isolates_physical_button_authorization(self):
     for tja_flag in (False, True):
@@ -121,7 +125,7 @@ class TestMazdaSafety(common.CarSafetyTest, common.DriverTorqueSteeringSafetyTes
     self.assertTrue(self._rx(self._tja_button_msg(True)))
     self.assertTrue(self.safety.get_controls_allowed_lateral())
 
-    self._clear_lateral_with_heartbeat()
+    self._clear_lateral_with_heartbeat(expected_acc_main=False)
     self.safety.set_heartbeat_engaged_mads(True)
     self.assertTrue(self._rx(self._tja_button_msg(True)))
     self.assertFalse(self.safety.get_controls_allowed_lateral())
@@ -148,6 +152,58 @@ class TestMazdaSafety(common.CarSafetyTest, common.DriverTorqueSteeringSafetyTes
     self.assertTrue(self._rx(self._acc_main_msg(True)))
     self.assertTrue(self._rx(self._tja_button_msg(False)))
     self.assertTrue(self._rx(self._tja_button_msg(True)))
+    self.assertFalse(self.safety.get_controls_allowed_lateral())
+
+  def test_non_tja_acc_main_fall_still_exits_lateral(self):
+    self._configure_tja_mads(tja_flag=False)
+    self.assertTrue(self._rx(self._acc_main_msg(True)))
+    self.assertTrue(self.safety.get_acc_main_on())
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+
+    self.assertTrue(self._rx(self._acc_main_msg(False)))
+    self.assertFalse(self.safety.get_acc_main_on())
+    self.assertFalse(self.safety.get_controls_allowed_lateral())
+
+  def test_tja_acc_main_toggles_do_not_change_lateral_permission(self):
+    self._configure_tja_mads()
+    self.assertTrue(self._rx(self._tja_button_msg(False)))
+    self.assertTrue(self._rx(self._tja_button_msg(True)))
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+
+    for available in (True, False, True, False):
+      self.assertTrue(self._rx(self._acc_main_msg(available)))
+      self.assertFalse(self.safety.get_acc_main_on())
+      self.assertTrue(self.safety.get_controls_allowed_lateral())
+
+    self.assertTrue(self._tx(self._torque_cmd_msg(12)))
+
+  def test_tja_heartbeat_and_steering_disengage_still_clear_lateral(self):
+    for trigger in ("heartbeat", "steering"):
+      with self.subTest(trigger=trigger):
+        self._configure_tja_mads()
+        self.assertTrue(self._rx(self._tja_button_msg(False)))
+        self.assertTrue(self._rx(self._tja_button_msg(True)))
+        self.assertTrue(self.safety.get_controls_allowed_lateral())
+
+        if trigger == "heartbeat":
+          self.safety.set_heartbeat_engaged_mads(False)
+          for _ in range(3):
+            self.safety.mads_heartbeat_engaged_check()
+        else:
+          self.safety.set_steering_disengage(True)
+          self.assertTrue(self._rx(self._speed_msg(10)))
+
+        self.assertFalse(self.safety.get_controls_allowed_lateral())
+
+  def test_tja_configured_brake_disengage_still_clears_lateral(self):
+    self._configure_tja_mads()
+    self.safety.set_mads_params(True, True, False)
+    self.safety.set_heartbeat_engaged_mads(True)
+    self.assertTrue(self._rx(self._tja_button_msg(False)))
+    self.assertTrue(self._rx(self._tja_button_msg(True)))
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+
+    self.assertTrue(self._rx(self._user_brake_msg(True)))
     self.assertFalse(self.safety.get_controls_allowed_lateral())
 
   def test_tja_safety_reinit_clears_stale_state(self):

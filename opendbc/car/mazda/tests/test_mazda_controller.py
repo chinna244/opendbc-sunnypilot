@@ -15,7 +15,7 @@ from opendbc.car.mazda.longitudinal import (HOLD_CTRL_LATCH_FRAMES, HOLD_LATCH_F
                                             RESUME_REACTIVATE_FRAMES, RESUME_RELEASE_FRAMES, RESUME_UNLATCH_FRAMES,
                                             StopAndGoStateMachine, StopGoState)
 from opendbc.car.mazda.interface import CarInterface
-from opendbc.car.mazda.values import CAR, CarControllerParams
+from opendbc.car.mazda.values import CAR, CarControllerParams, MazdaSafetyFlags
 from opendbc.sunnypilot.car.mazda.icbm import IntelligentCruiseButtonManagementInterface
 
 
@@ -89,6 +89,17 @@ class TestMazdaLateralAuthorization:
     assert not CP.openpilotLongitudinalControl
     controller = CarController({Bus.pt: "mazda_2017"}, CP, CP_SP)
     controller.frame = 1  # keep this steering-only fixture off the periodic HUD update frame
+    assert controller.CP.safetyConfigs[0].safetyParam & MazdaSafetyFlags.TJA
+    return controller
+
+  @pytest.fixture
+  def legacy_controller(self):
+    CP = CarInterface.get_params(CAR.MAZDA_CX9_2021, {0: {}, 1: {}, 2: {}}, [], alpha_long=False,
+                                 is_release=False, docs=False)
+    CP_SP = CarInterface.get_params_sp(CP, CAR.MAZDA_CX9_2021, {0: {}, 1: {}, 2: {}}, [], False, False, False)
+    assert not (CP.safetyConfigs[0].safetyParam & MazdaSafetyFlags.TJA)
+    controller = CarController({Bus.pt: "mazda_2017"}, CP, CP_SP)
+    controller.frame = 1
     return controller
 
   @pytest.fixture(autouse=True)
@@ -96,9 +107,9 @@ class TestMazdaLateralAuthorization:
     monkeypatch.setattr(IntelligentCruiseButtonManagementInterface, "update", lambda *args: [])
 
   @staticmethod
-  def controls():
+  def controls(lat_active=True):
     control = structs.CarControl()
-    control.latActive = True
+    control.latActive = lat_active
     control.actuators.torque = 1.0
     return control.as_reader(), structs.CarControlSP()
 
@@ -117,26 +128,39 @@ class TestMazdaLateralAuthorization:
     dat = next(dat for addr, dat, bus in sends if addr == 0x243 and bus == 0)
     return (((dat[0] & 0x0f) << 8) | dat[1]) - 2048
 
-  def test_tja_waits_for_acc_main_without_accumulating_torque(self, controller):
+  def test_tja_lateral_does_not_depend_on_acc_main(self, controller):
     control, control_sp = self.controls()
     carstate = self.carstate(available=False)
 
-    # MADS/latActive and desired torque can be nonzero immediately after TJA, but the
-    # real ACC-main transition has not reached CarState/Panda yet.
-    for _ in range(20):
-      actuators, sends = controller.update(control, control_sp, carstate, 0)
-      assert self.lkas_request(sends) == 0
-      assert actuators.torqueOutputCan == 0
-      assert controller.apply_torque_last == 0
-
-    # The first authorized cycle starts from Panda's zero baseline, then ramps normally.
-    carstate.out.cruiseState.available = True
     emitted = []
     for _ in range(4):
       actuators, sends = controller.update(control, control_sp, carstate, 0)
       emitted.append(self.lkas_request(sends))
       assert actuators.torqueOutputCan == emitted[-1]
     assert emitted == [12, 24, 36, 48]
+
+  def test_non_tja_lateral_remains_gated_by_acc_main(self, legacy_controller):
+    control, control_sp = self.controls()
+    carstate = self.carstate(available=False)
+
+    for _ in range(20):
+      actuators, sends = legacy_controller.update(control, control_sp, carstate, 0)
+      assert self.lkas_request(sends) == 0
+      assert actuators.torqueOutputCan == 0
+      assert legacy_controller.apply_torque_last == 0
+
+    carstate.out.cruiseState.available = True
+    _, sends = legacy_controller.update(control, control_sp, carstate, 0)
+    assert self.lkas_request(sends) == legacy_controller.params.STEER_DELTA_UP
+
+  def test_lat_inactive_always_commands_zero(self, controller):
+    control, control_sp = self.controls(lat_active=False)
+    carstate = self.carstate(available=False)
+    for _ in range(4):
+      actuators, sends = controller.update(control, control_sp, carstate, 0)
+      assert self.lkas_request(sends) == 0
+      assert actuators.torqueOutputCan == 0
+      assert controller.apply_torque_last == 0
 
   def test_mrcc_available_path_retains_normal_ramp(self, controller):
     control, control_sp = self.controls()
