@@ -172,6 +172,97 @@ class TestMazdaLateralAuthorization:
       emitted.append(self.lkas_request(sends))
     assert emitted == [12, 24, 36, 48]
 
+  @pytest.mark.parametrize(("lat_active", "available", "camera_raw", "expected_tja", "expected_torque"), [
+    (False, False, "4201000000001040", (0, 0), 0),
+    (True, False, "4201000000001040", (2, 2), 12),
+    (False, True, "4201000a20001040", (0, 0), 0),
+    (True, True, "4201000a20001040", (2, 2), 12),
+  ])
+  def test_tja_hud_matrix_does_not_change_steering_or_follow_mrcc(self, controller, lat_active, available,
+                                                                  camera_raw, expected_tja, expected_torque):
+    control, control_sp = self.controls(lat_active=lat_active)
+    carstate = self.carstate(available=available)
+    carstate.cam_laneinfo = decode_laneinfo(camera_raw, bus=2)
+    controller.frame = 50
+
+    actuators, sends = controller.update(control, control_sp, carstate, 0)
+    assert actuators.torqueOutputCan == expected_torque
+    assert self.lkas_request(sends) == expected_torque
+    hud = next(dat for addr, dat, bus in sends if addr == 0x440 and bus == 0)
+    decoded = decode_laneinfo(hud.hex(), bus=0)
+    assert (decoded["TJA"], decoded["TJA_TRANSITION"]) == expected_tja
+
+
+def decode_laneinfo(raw, bus):
+  parser = CANParser("mazda_2017", [("CAM_LANEINFO", float("nan"))], bus)
+  parser.update([(0, [(0x440, bytes.fromhex(raw), bus)])])
+  return dict(parser.vl["CAM_LANEINFO"])
+
+
+class TestMazdaHudMessages:
+
+  @pytest.fixture
+  def packer(self):
+    return CANPacker("mazda_2017")
+
+  @pytest.mark.parametrize(("raw", "tja_active", "expected_raw", "expected_tja"), [
+    ("4201000000001040", False, "4201000000001040", (0, 0)),
+    ("4201000a20001040", False, "4201000000001040", (0, 0)),  # MADS off, MRCC on
+    ("4201000000001040", True, "4201000820001040", (2, 2)),   # MADS on, MRCC off
+    ("4201000a20001040", True, "4201000820001040", (2, 2)),  # MADS on, MRCC on
+  ])
+  def test_tja_platform_display_matrix(self, packer, raw, tja_active, expected_raw, expected_tja):
+    camera = decode_laneinfo(raw, bus=2)
+    _, generated, bus = mazdacan.create_alert_command(packer, camera, False, False,
+                                                      tja_lateral=True, tja_active=tja_active)
+    decoded = decode_laneinfo(generated.hex(), bus=0)
+    assert bus == 0
+    assert generated.hex() == expected_raw
+    assert (decoded["TJA"], decoded["TJA_TRANSITION"]) == expected_tja
+
+  def test_tja_on_off_reenable_does_not_latch_state(self, packer):
+    camera = decode_laneinfo("4201000a20001040", bus=2)  # MRCC remains on throughout
+    for tja_active, expected in ((True, (2, 2)), (False, (0, 0)), (True, (2, 2))):
+      _, generated, _ = mazdacan.create_alert_command(packer, camera, False, False,
+                                                      tja_lateral=True, tja_active=tja_active)
+      decoded = decode_laneinfo(generated.hex(), bus=0)
+      assert (decoded["TJA"], decoded["TJA_TRANSITION"]) == expected
+
+  def test_mrcc_changes_do_not_toggle_active_tja_hud(self, packer):
+    for raw in ("4201000a20001040", "4201000000001040", "4201000a20001040"):
+      camera = decode_laneinfo(raw, bus=2)
+      _, generated, _ = mazdacan.create_alert_command(packer, camera, False, False,
+                                                      tja_lateral=True, tja_active=True)
+      decoded = decode_laneinfo(generated.hex(), bus=0)
+      assert (decoded["TJA"], decoded["TJA_TRANSITION"]) == (2, 2)
+
+  def test_non_tja_stage5c_payload_is_unchanged(self, packer):
+    camera = decode_laneinfo("4201000a20001040", bus=2)
+    _, generated, _ = mazdacan.create_alert_command(packer, camera, False, False,
+                                                    tja_lateral=False, tja_active=True)
+    assert generated.hex() == "4201000000001040"
+
+  @pytest.mark.parametrize(("steer_required", "expected", "raw"), [
+    (False, (0, 0, 0), "4201000820001040"),
+    (True, (7, 1, 1), "4201000820001e49"),
+  ])
+  def test_hands_warning_and_tja_state_are_independent(self, packer, steer_required, expected, raw):
+    camera = decode_laneinfo("4201000a20001040", bus=2)
+    _, generated, _ = mazdacan.create_alert_command(packer, camera, False, steer_required,
+                                                    tja_lateral=True, tja_active=True)
+    decoded = decode_laneinfo(generated.hex(), bus=0)
+    assert generated.hex() == raw
+    assert (decoded["HANDS_WARN_3_BITS"], decoded["HANDS_ON_STEER_WARN"], decoded["HANDS_ON_STEER_WARN_2"]) == expected
+    assert (decoded["TJA"], decoded["TJA_TRANSITION"]) == (2, 2)
+
+  def test_lane_fields_remain_camera_pass_through(self, packer):
+    camera = decode_laneinfo("4201000a20001040", bus=2)
+    _, generated, _ = mazdacan.create_alert_command(packer, camera, False, False,
+                                                    tja_lateral=True, tja_active=True)
+    decoded = decode_laneinfo(generated.hex(), bus=0)
+    for signal in ("LINE_VISIBLE", "LINE_NOT_VISIBLE", "LANE_LINES", "BIT1", "BIT2", "BIT3", "NO_ERR_BIT", "S1", "S1_HBEAM"):
+      assert decoded[signal] == camera[signal]
+
 
 def crz_info_reference_checksum(dat):
   # independent reimplementation of the CRZ_INFO checksum, validated against 1.94M stock
