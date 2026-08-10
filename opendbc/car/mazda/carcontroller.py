@@ -37,12 +37,6 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
   def update(self, CC, CC_SP, CS, now_nanos):
     can_sends = []
 
-    # Restore continuous CRZ_BTNS to the FSC as exact sanitized clones. Original physical
-    # 0x09D remains blocked bus0->bus2 by panda; physical TJA is represented as MRCC to the FSC.
-    for dat in CS.crz_btns_raw_payloads:
-      can_sends.append(mazdacan.create_sanitized_crz_btns_clone(dat, bus=2))
-    CS.crz_btns_raw_payloads = []
-
     apply_torque = 0
 
     # Speed-dependent STEER_MAX (CX-5 2022: 1200 below 32 mph, 800 above)

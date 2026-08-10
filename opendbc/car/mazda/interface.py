@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 from opendbc.car import Bus, get_safety_config, structs
-from opendbc.car.can_definitions import CanData
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.interfaces import CarInterfaceBase
 from opendbc.car.mazda.carcontroller import CarController
 from opendbc.car.mazda.carstate import CarState
-from opendbc.car.mazda.mazdacan import CRZ_BTNS_ADDR
 from opendbc.car.mazda.radar_interface import RadarInterface
 from opendbc.car.mazda.values import CAR, DBC, LKAS_LIMITS, STEER_TO_ZERO_EPS_FW, MazdaSafetyFlags
 
@@ -14,27 +12,6 @@ class CarInterface(CarInterfaceBase):
   CarState = CarState
   CarController = CarController
   RadarInterface = RadarInterface
-
-  def update(self, can_packets: tuple[int, list[CanData]] | list[tuple[int, list[CanData]]]) -> tuple[structs.CarState, structs.CarStateSP]:
-    # Capture exact physical CRZ_BTNS bytes before parsing. CANParser only keeps decoded
-    # signals and would drop undefined payload bits needed for the FSC clone.
-    #
-    # Match CANParser.update() input normalization: production and model tests pass one
-    # (t, frames) packet; card may pass a list of packets.
-    packets: list[tuple[int, list[CanData]]]
-    if can_packets and not isinstance(can_packets[0], (list, tuple)):
-      packets = [can_packets]  # type: ignore[list-item]
-    else:
-      packets = can_packets  # type: ignore[assignment]
-
-    payloads: list[bytes] = []
-    for _, frames in packets:
-      for msg in frames:
-        address, dat, src = msg
-        if address == CRZ_BTNS_ADDR and src == 0 and len(dat) == 8:
-          payloads.append(bytes(dat))
-    self.CS.crz_btns_raw_payloads = payloads
-    return super().update(can_packets)
 
   @staticmethod
   def _get_params(ret: structs.CarParams, candidate, fingerprint, car_fw, alpha_long, is_release, docs) -> structs.CarParams:

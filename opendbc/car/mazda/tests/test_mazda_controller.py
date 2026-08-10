@@ -108,7 +108,7 @@ class TestMazdaLateralAuthorization:
     out.vEgoRaw = 10.0
     out.steeringTorque = 0.0
     out.cruiseState.available = available
-    return SimpleNamespace(out=out, crz_btns_raw_payloads=[], crz_btns_counter=0,
+    return SimpleNamespace(out=out, crz_btns_counter=0,
                            cam_laneinfo={}, cam_lkas={"BIT_1": 1, "ERR_BIT_1": 0, "ERR_BIT_2": 0},
                            lkas_allowed_speed=True, cancel_button=0)
 

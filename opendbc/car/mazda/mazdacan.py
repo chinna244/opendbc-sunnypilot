@@ -206,27 +206,3 @@ def create_button_cmd(packer, CP, counter, button):
     }
 
     return packer.make_can_msg("CRZ_BTNS", 0, values)
-
-
-# CRZ_BTNS button bits: DBC start bits match panda GET_BIT flat numbering.
-CRZ_BTNS_ADDR = 0x9D
-CRZ_BTNS_TJA_BIT = 11
-CRZ_BTNS_MRCC_BIT = 15
-CRZ_BTNS_MRCC_COMPANION_BIT = 16
-
-
-def create_sanitized_crz_btns_clone(dat: bytes, bus: int = 2) -> CanData:
-  """Exact physical CRZ_BTNS clone with TJA represented to the FSC as MRCC.
-
-  create_button_cmd() synthesizes button state and advances CTR; do not use it here.
-  Undefined/reserved payload bits must be preserved byte-for-byte from the source frame.
-  """
-  if len(dat) != 8:
-    raise ValueError(f"CRZ_BTNS clone requires 8 bytes, got {len(dat)}")
-  out = bytearray(dat)
-  tja_pressed = bool(out[CRZ_BTNS_TJA_BIT // 8] & (1 << (CRZ_BTNS_TJA_BIT % 8)))
-  out[CRZ_BTNS_TJA_BIT // 8] &= ~(1 << (CRZ_BTNS_TJA_BIT % 8))
-  if tja_pressed:
-    out[CRZ_BTNS_MRCC_BIT // 8] |= 1 << (CRZ_BTNS_MRCC_BIT % 8)
-    out[CRZ_BTNS_MRCC_COMPANION_BIT // 8] &= ~(1 << (CRZ_BTNS_MRCC_COMPANION_BIT % 8))
-  return CanData(CRZ_BTNS_ADDR, bytes(out), bus)
