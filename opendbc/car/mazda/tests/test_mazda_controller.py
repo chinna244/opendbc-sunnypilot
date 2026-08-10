@@ -16,6 +16,7 @@ from opendbc.car.mazda.longitudinal import (HOLD_CTRL_LATCH_FRAMES, HOLD_LATCH_F
                                             StopAndGoStateMachine, StopGoState)
 from opendbc.car.mazda.interface import CarInterface
 from opendbc.car.mazda.values import CAR, CarControllerParams
+from opendbc.sunnypilot.car.mazda.icbm import IntelligentCruiseButtonManagementInterface
 
 
 class TestCarControllerParams:
@@ -76,6 +77,76 @@ class TestCarControllerParams:
     assert not hasattr(pre_2022_params, 'STEER_MAX_LOOKUP')
     assert pre_2022_params.STEER_MAX == 800
     assert pre_2022_params.STEER_DRIVER_MULTIPLIER == 1
+
+
+class TestMazdaLateralAuthorization:
+
+  @pytest.fixture
+  def controller(self):
+    CP = CarInterface.get_params(CAR.MAZDA_CX5_2022, {0: {}, 1: {}, 2: {}}, [], alpha_long=False,
+                                 is_release=False, docs=False)
+    CP_SP = CarInterface.get_params_sp(CP, CAR.MAZDA_CX5_2022, {0: {}, 1: {}, 2: {}}, [], False, False, False)
+    assert not CP.openpilotLongitudinalControl
+    controller = CarController({Bus.pt: "mazda_2017"}, CP, CP_SP)
+    controller.frame = 1  # keep this steering-only fixture off the periodic HUD update frame
+    return controller
+
+  @pytest.fixture(autouse=True)
+  def disable_icbm(self, monkeypatch):
+    monkeypatch.setattr(IntelligentCruiseButtonManagementInterface, "update", lambda *args: [])
+
+  @staticmethod
+  def controls():
+    control = structs.CarControl()
+    control.latActive = True
+    control.actuators.torque = 1.0
+    return control.as_reader(), structs.CarControlSP()
+
+  @staticmethod
+  def carstate(available):
+    out = structs.CarState()
+    out.vEgoRaw = 10.0
+    out.steeringTorque = 0.0
+    out.cruiseState.available = available
+    return SimpleNamespace(out=out, crz_btns_raw_payloads=[], crz_btns_counter=0,
+                           cam_laneinfo={}, cam_lkas={"BIT_1": 1, "ERR_BIT_1": 0, "ERR_BIT_2": 0},
+                           lkas_allowed_speed=True, cancel_button=0)
+
+  @staticmethod
+  def lkas_request(sends):
+    dat = next(dat for addr, dat, bus in sends if addr == 0x243 and bus == 0)
+    return (((dat[0] & 0x0f) << 8) | dat[1]) - 2048
+
+  def test_tja_waits_for_acc_main_without_accumulating_torque(self, controller):
+    control, control_sp = self.controls()
+    carstate = self.carstate(available=False)
+
+    # MADS/latActive and desired torque can be nonzero immediately after TJA, but the
+    # real ACC-main transition has not reached CarState/Panda yet.
+    for _ in range(20):
+      actuators, sends = controller.update(control, control_sp, carstate, 0)
+      assert self.lkas_request(sends) == 0
+      assert actuators.torqueOutputCan == 0
+      assert controller.apply_torque_last == 0
+
+    # The first authorized cycle starts from Panda's zero baseline, then ramps normally.
+    carstate.out.cruiseState.available = True
+    emitted = []
+    for _ in range(4):
+      actuators, sends = controller.update(control, control_sp, carstate, 0)
+      emitted.append(self.lkas_request(sends))
+      assert actuators.torqueOutputCan == emitted[-1]
+    assert emitted == [12, 24, 36, 48]
+
+  def test_mrcc_available_path_retains_normal_ramp(self, controller):
+    control, control_sp = self.controls()
+    carstate = self.carstate(available=True)
+
+    emitted = []
+    for _ in range(4):
+      _, sends = controller.update(control, control_sp, carstate, 0)
+      emitted.append(self.lkas_request(sends))
+    assert emitted == [12, 24, 36, 48]
 
 
 def crz_info_reference_checksum(dat):

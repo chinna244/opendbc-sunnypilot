@@ -52,7 +52,10 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     else:
       steer_max = self.params.STEER_MAX
 
-    if CC.latActive:
+    # Panda authorizes Mazda MADS lateral control from the same ACC-main state exposed as
+    # cruiseState.available. Keep both the wire command and our rate-limit baseline at zero
+    # until that state catches up with a dedicated TJA-button engagement.
+    if CC.latActive and CS.out.cruiseState.available:
       # calculate steer and also set limits due to driver torque
       new_torque = int(round(CC.actuators.torque * steer_max))
       apply_torque = apply_driver_steer_torque_limits(new_torque, self.apply_torque_last,
