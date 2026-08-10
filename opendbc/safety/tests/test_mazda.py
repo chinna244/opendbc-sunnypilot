@@ -61,6 +61,108 @@ class TestMazdaSafety(common.CarSafetyTest, common.DriverTorqueSteeringSafetyTes
     values = {"CRZ_ACTIVE": enable}
     return self.packer.make_can_msg_safety("CRZ_CTRL", 0, values)
 
+  def _acc_main_msg(self, enable):
+    values = {"CRZ_AVAILABLE": enable}
+    return self.packer.make_can_msg_safety("CRZ_CTRL", 0, values)
+
+  def _tja_button_msg(self, tja=False, mrcc=False, bus=0):
+    values = {"TJA_BUTTON": tja, "MRCC_BUTTON": mrcc}
+    return self.packer.make_can_msg_safety("CRZ_BTNS", bus, values)
+
+  def _configure_tja_mads(self, tja_flag=True, enable_mads=True):
+    param = MazdaSafetyFlags.TJA if tja_flag else 0
+    self.safety.set_safety_hooks(CarParams.SafetyModel.mazda, param)
+    self.safety.init_tests()
+    self.safety.set_mads_params(enable_mads, False, False)
+    self.safety.set_heartbeat_engaged_mads(True)
+
+  def _clear_lateral_with_heartbeat(self):
+    self.safety.set_heartbeat_engaged_mads(False)
+    for _ in range(3):
+      self.safety.mads_heartbeat_engaged_check()
+    self.assertFalse(self.safety.get_controls_allowed_lateral())
+    self.assertTrue(self.safety.get_acc_main_on())
+
+  def _route27_cleared_state(self, tja_flag=True):
+    self._configure_tja_mads(tja_flag=tja_flag)
+    self.assertTrue(self._rx(self._acc_main_msg(True)))
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+    self._clear_lateral_with_heartbeat()
+    self.safety.set_heartbeat_engaged_mads(True)
+    self.safety.mads_heartbeat_engaged_check()
+    self.assertFalse(self.safety.get_controls_allowed_lateral())
+    self.assertTrue(self.safety.get_acc_main_on())
+
+  def test_tja_flag_isolates_physical_button_authorization(self):
+    for tja_flag in (False, True):
+      with self.subTest(tja_flag=tja_flag):
+        self._route27_cleared_state(tja_flag=tja_flag)
+        self.assertTrue(self._rx(self._tja_button_msg(False)))
+        self.assertTrue(self._rx(self._tja_button_msg(True)))
+        self.assertEqual(tja_flag, self.safety.get_controls_allowed_lateral())
+
+  def test_route27_tja_reenable_lifecycle_and_torque(self):
+    self._route27_cleared_state()
+
+    # A matching heartbeat only clears the mismatch counter; it is not an authorization edge.
+    self.assertFalse(self._tx(self._torque_cmd_msg(12)))
+    self.assertFalse(self.safety.get_controls_allowed_lateral())
+
+    self.assertTrue(self._rx(self._tja_button_msg(False)))
+    self.assertEqual(0, self.safety.get_mads_button_press())
+    self.assertTrue(self._rx(self._tja_button_msg(True)))
+    self.assertEqual(1, self.safety.get_mads_button_press())
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+    self.assertTrue(self._tx(self._torque_cmd_msg(12)))
+
+  def test_held_tja_requires_release_before_reauthorization(self):
+    self._route27_cleared_state()
+    self.assertTrue(self._rx(self._tja_button_msg(False)))
+    self.assertTrue(self._rx(self._tja_button_msg(True)))
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+
+    self._clear_lateral_with_heartbeat()
+    self.safety.set_heartbeat_engaged_mads(True)
+    self.assertTrue(self._rx(self._tja_button_msg(True)))
+    self.assertFalse(self.safety.get_controls_allowed_lateral())
+
+    self.assertTrue(self._rx(self._tja_button_msg(False)))
+    self.assertEqual(0, self.safety.get_mads_button_press())
+    self.assertTrue(self._rx(self._tja_button_msg(True)))
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+
+  def test_mrcc_and_host_tx_cannot_authorize_as_tja(self):
+    self._route27_cleared_state()
+
+    self.assertTrue(self._rx(self._tja_button_msg(False)))
+    self.assertTrue(self._rx(self._tja_button_msg(mrcc=True)))
+    self.assertFalse(self.safety.get_controls_allowed_lateral())
+    self.assertEqual(0, self.safety.get_mads_button_press())
+
+    self.assertFalse(self._tx(self._tja_button_msg(tja=True)))
+    self.assertFalse(self.safety.get_controls_allowed_lateral())
+    self.assertEqual(0, self.safety.get_mads_button_press())
+
+  def test_tja_cannot_authorize_when_mads_disabled(self):
+    self._configure_tja_mads(enable_mads=False)
+    self.assertTrue(self._rx(self._acc_main_msg(True)))
+    self.assertTrue(self._rx(self._tja_button_msg(False)))
+    self.assertTrue(self._rx(self._tja_button_msg(True)))
+    self.assertFalse(self.safety.get_controls_allowed_lateral())
+
+  def test_tja_safety_reinit_clears_stale_state(self):
+    self._configure_tja_mads()
+    self.assertTrue(self._rx(self._tja_button_msg(False)))
+    self.assertTrue(self._rx(self._tja_button_msg(True)))
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+    self.assertEqual(1, self.safety.get_mads_button_press())
+
+    # Production reapplies alternativeExperience before setting the car safety model.
+    self.safety.set_mads_params(True, False, False)
+    self.safety.set_safety_hooks(CarParams.SafetyModel.mazda, MazdaSafetyFlags.TJA)
+    self.assertFalse(self.safety.get_controls_allowed_lateral())
+    self.assertEqual(-1, self.safety.get_mads_button_press())
+
   def _button_msg(self, resume=False, cancel=False):
     values = {
       "CAN_OFF": cancel,

@@ -3,7 +3,7 @@ import pytest
 from opendbc.car import structs
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.mazda.interface import CarInterface
-from opendbc.car.mazda.values import CAR, LKAS_LIMITS, STEER_TO_ZERO_EPS_FW
+from opendbc.car.mazda.values import CAR, LKAS_LIMITS, STEER_TO_ZERO_EPS_FW, MazdaSafetyFlags
 
 Ecu = structs.CarParams.Ecu
 
@@ -80,3 +80,15 @@ class TestMazdaEpsSwap:
       CP = CarInterface.get_params(candidate, {0: {}, 1: {}, 2: {}}, [], False,
                                    is_release=False, docs=True)
       assert CP.dashcamOnly, candidate
+
+
+def test_tja_safety_flag_isolated_to_verified_platform():
+  for candidate in CAR:
+    CP = _params(candidate)
+    has_tja_flag = bool(CP.safetyConfigs[0].safetyParam & MazdaSafetyFlags.TJA)
+    assert has_tja_flag == (candidate == CAR.MAZDA_CX5_2022), candidate
+
+  # TJA and longitudinal flags are independent and must coexist on the verified platform.
+  CP = _params(CAR.MAZDA_CX5_2022, alpha_long=True)
+  assert CP.safetyConfigs[0].safetyParam & MazdaSafetyFlags.TJA
+  assert CP.safetyConfigs[0].safetyParam & MazdaSafetyFlags.LONG

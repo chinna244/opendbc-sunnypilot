@@ -25,8 +25,10 @@
 #define MAZDA_CAM  2
 
 #define MAZDA_PARAM_LONGITUDINAL 1U
+#define MAZDA_PARAM_TJA 2U
 
 static bool mazda_longitudinal = false;
+static bool mazda_tja_button = false;
 
 // With longitudinal control the stock radar is silenced and openpilot replays its frames,
 // so allowed tx patterns are pinned to byte-exact stock captures wherever possible.
@@ -100,6 +102,10 @@ static void mazda_rx_hook(const CANPacket_t *msg) {
       bool cruise_engaged = msg->data[0] & 0x8U;
       pcm_cruise_check(cruise_engaged);
       acc_main_on = GET_BIT(msg, 17U);
+    }
+
+    if ((msg->addr == MAZDA_CRZ_BTNS) && mazda_tja_button) {
+      mads_button_press = GET_BIT(msg, 11U) ? MADS_BUTTON_PRESSED : MADS_BUTTON_NOT_PRESSED;
     }
 
     if ((msg->addr == MAZDA_CRZ_BTNS) && mazda_longitudinal) {
@@ -278,7 +284,9 @@ static safety_config mazda_init(uint16_t param) {
   };
 
   mazda_longitudinal = GET_FLAG(param, MAZDA_PARAM_LONGITUDINAL);
+  mazda_tja_button = GET_FLAG(param, MAZDA_PARAM_TJA);
   acc_main_on = false;
+  mads_button_press = MADS_BUTTON_UNAVAILABLE;
 
   return mazda_longitudinal ? BUILD_SAFETY_CFG(mazda_long_rx_checks, MAZDA_LONG_TX_MSGS) :
                               BUILD_SAFETY_CFG(mazda_rx_checks, MAZDA_TX_MSGS);

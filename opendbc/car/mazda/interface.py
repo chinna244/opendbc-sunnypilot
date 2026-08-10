@@ -18,6 +18,9 @@ class CarInterface(CarInterfaceBase):
     ret.brand = "mazda"
     ret.safetyConfigs = [get_safety_config(structs.CarParams.SafetyModel.mazda)]
 
+    if candidate == CAR.MAZDA_CX5_2022:
+      ret.safetyConfigs[0].safetyParam |= MazdaSafetyFlags.TJA.value
+
     ret.radarUnavailable = Bus.radar not in DBC[candidate]
 
     # 2022+ CX-5 EPS can steer to zero and has no hands-off lockout. Detected by EPS firmware
