@@ -98,6 +98,7 @@ class TestMazdaSafety(common.CarSafetyTest, common.DriverTorqueSteeringSafetyTes
     out[1] &= ~0x08  # TJA_BUTTON bit 11
     if tja_pressed:
       out[1] |= 0x80  # MRCC_BUTTON bit 15
+      out[2] &= ~0x01  # captured MRCC companion bit 16
     return bytes(out)
 
   def _rx_crz_btns(self, dat: bytes):
@@ -108,9 +109,9 @@ class TestMazdaSafety(common.CarSafetyTest, common.DriverTorqueSteeringSafetyTes
 
   def test_crz_btns_sanitized_clone_contract(self):
     # Representative physical frames with undefined trailing bytes preserved.
-    idle = bytes.fromhex("0001ffffffffff03")
-    tja = bytes.fromhex("0009ffffffffff04")
-    mrcc = bytes.fromhex("0081ffffffffff05")
+    idle = bytes.fromhex("0001fff000000000")
+    tja = bytes.fromhex("0009fff400000000")
+    mrcc = bytes.fromhex("0081fef400000000")
     cancel = bytes.fromhex("0101ffffffffff06")
     resume = bytes.fromhex("0401ffffffffff07")
     set_p = bytes.fromhex("1001ffffffffff08")
@@ -124,28 +125,38 @@ class TestMazdaSafety(common.CarSafetyTest, common.DriverTorqueSteeringSafetyTes
     self.assertTrue(self._rx_crz_btns(idle))
     self.assertTrue(self._tx_crz_btns_cam(self._fsc_crz_btns(idle)))
 
-    # 3. Physical TJA must be represented as MRCC. Both the old Stage-2 representation
-    # and unchanged TJA=1 are rejected without consuming the source authorization.
+    # 3. Physical TJA must match the exact same-counter stock MRCC capture. The old
+    # Stage-2 representation, unchanged TJA, and incomplete Stage-5B shape are rejected
+    # without consuming the source authorization.
     self.assertTrue(self._rx_crz_btns(tja))
     old_stage2 = bytearray(tja)
     old_stage2[1] &= ~0x08
     self.assertFalse(self._tx_crz_btns_cam(bytes(old_stage2)))
     self.assertFalse(self._tx_crz_btns_cam(tja))
+    incomplete_stage5b = bytearray(tja)
+    incomplete_stage5b[1] = (incomplete_stage5b[1] & ~0x08) | 0x80
+    self.assertEqual(bytes.fromhex("0081fff400000000"), bytes(incomplete_stage5b))
+    self.assertFalse(self._tx_crz_btns_cam(bytes(incomplete_stage5b)))
     coherent_tja = self._fsc_crz_btns(tja)
-    self.assertEqual(bytes.fromhex("0081ffffffffff04"), coherent_tja)
+    self.assertEqual(mrcc, coherent_tja)
     self.assertTrue(self._tx_crz_btns_cam(coherent_tja))
 
-    # 4. Arbitrary MRCC injection is not authorized by an idle physical source.
+    # 4. Neither an arbitrary bit-16 clear nor MRCC injection is authorized by idle.
     self.assertTrue(self._rx_crz_btns(idle))
+    cleared_companion = bytearray(idle)
+    cleared_companion[2] &= ~0x01
+    self.assertFalse(self._tx_crz_btns_cam(bytes(cleared_companion)))
     injected_mrcc = bytearray(idle)
     injected_mrcc[1] |= 0x80
     self.assertFalse(self._tx_crz_btns_cam(bytes(injected_mrcc)))
     self.assertTrue(self._tx_crz_btns_cam(self._fsc_crz_btns(idle)))
 
-    # 5. A real physical MRCC remains MRCC, and physical TJA+MRCC remains MRCC.
+    # 5. A stock-shaped physical MRCC remains byte-exact, and physical TJA+MRCC
+    # clears only TJA and the companion bit while retaining MRCC.
+    self.assertEqual(mrcc, self._fsc_crz_btns(mrcc))
     self.assertTrue(self._rx_crz_btns(mrcc))
     self.assertTrue(self._tx_crz_btns_cam(self._fsc_crz_btns(mrcc)))
-    tja_mrcc = bytes.fromhex("0089ffffffffff0b")
+    tja_mrcc = bytes.fromhex("0089fff40000000b")
     self.assertTrue(self._rx_crz_btns(tja_mrcc))
     self.assertTrue(self._tx_crz_btns_cam(self._fsc_crz_btns(tja_mrcc)))
 

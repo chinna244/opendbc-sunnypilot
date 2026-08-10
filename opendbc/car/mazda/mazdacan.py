@@ -212,6 +212,7 @@ def create_button_cmd(packer, CP, counter, button):
 CRZ_BTNS_ADDR = 0x9D
 CRZ_BTNS_TJA_BIT = 11
 CRZ_BTNS_MRCC_BIT = 15
+CRZ_BTNS_MRCC_COMPANION_BIT = 16
 
 
 def create_sanitized_crz_btns_clone(dat: bytes, bus: int = 2) -> CanData:
@@ -227,4 +228,5 @@ def create_sanitized_crz_btns_clone(dat: bytes, bus: int = 2) -> CanData:
   out[CRZ_BTNS_TJA_BIT // 8] &= ~(1 << (CRZ_BTNS_TJA_BIT % 8))
   if tja_pressed:
     out[CRZ_BTNS_MRCC_BIT // 8] |= 1 << (CRZ_BTNS_MRCC_BIT % 8)
+    out[CRZ_BTNS_MRCC_COMPANION_BIT // 8] &= ~(1 << (CRZ_BTNS_MRCC_COMPANION_BIT % 8))
   return CanData(CRZ_BTNS_ADDR, bytes(out), bus)
