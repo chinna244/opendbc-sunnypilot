@@ -90,6 +90,7 @@ extern ButtonState mads_button_press;
 extern MADSState m_mads_state;
 
 extern bool controls_allowed_lateral;
+extern bool mads_physical_button_only;
 
 // state for mads controls_allowed_lateral timeout logic
 extern bool heartbeat_engaged_mads;
@@ -111,6 +112,7 @@ extern void mads_heartbeat_engaged_check(void);
 // ===============================
 extern EdgeTransition m_get_edge_transition(bool current, bool last);
 extern void m_mads_state_init(void);
+extern void m_mads_state_reset(void);
 extern void m_update_button_state(ButtonStateTracking *button_state);
 extern void m_update_binary_state(BinaryStateTracking *state);
 extern void m_update_control_state(void);
