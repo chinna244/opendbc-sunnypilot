@@ -1,13 +1,13 @@
 import numpy as np
 
 from opendbc.can import CANPacker
-from opendbc.car import Bus, DT_CTRL, make_tester_present_msg, rate_limit, structs, uds
+from opendbc.car import Bus, make_tester_present_msg, rate_limit, structs, uds
 from opendbc.car.lateral import apply_driver_steer_torque_limits
 from opendbc.car.interfaces import CarControllerBase
 from opendbc.car.mazda import mazdacan
 from opendbc.car.mazda.longitudinal import (RADAR_ADDR, RadarSessionManager, RadarSessionState, StopAndGoStateMachine,
                                             StopGoState, create_radar_session_msg)
-from opendbc.car.mazda.values import CarControllerParams, Buttons
+from opendbc.car.mazda.values import Buttons, CarControllerParams, MazdaSafetyFlags
 
 from opendbc.sunnypilot.car.mazda.icbm import IntelligentCruiseButtonManagementInterface
 
@@ -24,6 +24,7 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     CarControllerBase.__init__(self, dbc_names, CP, CP_SP)
     IntelligentCruiseButtonManagementInterface.__init__(self, CP, CP_SP)
     self.params = CarControllerParams(CP)
+    self.tja_lateral = bool(CP.safetyConfigs[0].safetyParam & MazdaSafetyFlags.TJA)
     self.apply_torque_last = 0
     self.packer = CANPacker(dbc_names[Bus.pt])
     self.brake_counter = 0
@@ -46,7 +47,9 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     else:
       steer_max = self.params.STEER_MAX
 
-    if CC.latActive:
+    # Dedicated TJA platforms authorize lateral control from the physical TJA button in Panda.
+    # Legacy Mazda configurations remain coupled to ACC main/cruise availability.
+    if CC.latActive and (self.tja_lateral or CS.out.cruiseState.available):
       # calculate steer and also set limits due to driver torque
       new_torque = int(round(CC.actuators.torque * steer_max))
       apply_torque = apply_driver_steer_torque_limits(new_torque, self.apply_torque_last,
@@ -84,7 +87,8 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       steer_required = CC.hudControl.visualAlert == VisualAlert.steerRequired
       # TODO: find a way to silence audible warnings so we can add more hud alerts
       steer_required = steer_required and CS.lkas_allowed_speed
-      can_sends.append(mazdacan.create_alert_command(self.packer, CS.cam_laneinfo, ldw, steer_required))
+      can_sends.append(mazdacan.create_alert_command(self.packer, CS.cam_laneinfo, ldw, steer_required,
+                                                     self.tja_lateral, CC.latActive))
 
     # send steering command
     can_sends.append(mazdacan.create_steering_control(self.packer, self.CP,

@@ -140,7 +140,8 @@ def create_steering_control(packer, CP, frame, apply_torque, lkas):
   return packer.make_can_msg("CAM_LKAS", 0, values)
 
 
-def create_alert_command(packer, cam_msg: dict, ldw: bool, steer_required: bool):
+def create_alert_command(packer, cam_msg: dict, ldw: bool, steer_required: bool,
+                         tja_lateral: bool = False, tja_active: bool = False):
   values = {s: cam_msg[s] for s in [
     "LINE_VISIBLE",
     "LINE_NOT_VISIBLE",
@@ -163,6 +164,10 @@ def create_alert_command(packer, cam_msg: dict, ldw: bool, steer_required: bool)
     "LDW_WARN_LL": 0,
     "LDW_WARN_RL": 0,
   })
+  if tja_lateral:
+    # Stable states captured on the CX-5 2022: 0/0 off and 2/2 on. The physical FSC
+    # couples these fields to MRCC availability, so use the independent lateral state.
+    values.update({"TJA": 2 if tja_active else 0, "TJA_TRANSITION": 2 if tja_active else 0})
   return packer.make_can_msg("CAM_LANEINFO", 0, values)
 
 

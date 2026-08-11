@@ -25,8 +25,11 @@
 #define MAZDA_CAM  2
 
 #define MAZDA_PARAM_LONGITUDINAL 1U
+#define MAZDA_PARAM_TJA 2U
 
 static bool mazda_longitudinal = false;
+static bool mazda_tja_button = false;
+static bool mazda_tja_button_released = false;
 
 // With longitudinal control the stock radar is silenced and openpilot replays its frames,
 // so allowed tx patterns are pinned to byte-exact stock captures wherever possible.
@@ -62,6 +65,8 @@ static bool mazda_empty_radar_track_msg_valid(const CANPacket_t *msg) {
             (msg->data[2] == 0xfeU) && (msg->data[3] == 0x7fU) &&
             (msg->data[4] == 0xfbU) && (msg->data[5] == 0xffU) &&
             (msg->data[6] == 0x3fU) && ((msg->data[7] & 0xf0U) == 0xc0U);
+  } else {
+    // Addresses outside the six radar tracks are invalid.
   }
 
   return valid;
@@ -99,7 +104,16 @@ static void mazda_rx_hook(const CANPacket_t *msg) {
     if ((msg->addr == MAZDA_CRZ_CTRL) && !mazda_longitudinal) {
       bool cruise_engaged = msg->data[0] & 0x8U;
       pcm_cruise_check(cruise_engaged);
-      acc_main_on = GET_BIT(msg, 17U);
+      if (!mazda_tja_button) {
+        acc_main_on = GET_BIT(msg, 17U);
+      }
+    }
+
+    if ((msg->addr == MAZDA_CRZ_BTNS) && mazda_tja_button) {
+      const bool tja_pressed = GET_BIT(msg, 11U);
+      const bool tja_authorization_shape = tja_pressed && !GET_BIT(msg, 15U) && GET_BIT(msg, 16U);
+      mazda_tja_button_released = mazda_tja_button_released || !tja_pressed;
+      mads_button_press = (tja_authorization_shape && mazda_tja_button_released) ? MADS_BUTTON_PRESSED : MADS_BUTTON_NOT_PRESSED;
     }
 
     if ((msg->addr == MAZDA_CRZ_BTNS) && mazda_longitudinal) {
@@ -181,7 +195,10 @@ static bool mazda_tx_hook(const CANPacket_t *msg) {
                          (msg->data[7] == ((0x5dU - msg->data[6]) & 0xffU));
 
     // 13-bit ACCEL_CMD: data[2] low bits, data[3], data[4] high bits, offset 4096
-    int desired_accel = ((((int)msg->data[2] & 0x3) << 11) | (((int)msg->data[3]) << 3) | (((int)msg->data[4]) >> 5)) - 4096;
+    const uint16_t desired_accel_raw = (((uint16_t)msg->data[2] & 0x3U) << 11U) |
+                                       ((uint16_t)msg->data[3] << 3U) |
+                                       ((uint16_t)msg->data[4] >> 5U);
+    const int desired_accel = (int)desired_accel_raw - 4096;
     if (!stock_standby && longitudinal_accel_checks(desired_accel, MAZDA_LONG_LIMITS)) {
       tx = false;
     }
@@ -278,7 +295,11 @@ static safety_config mazda_init(uint16_t param) {
   };
 
   mazda_longitudinal = GET_FLAG(param, MAZDA_PARAM_LONGITUDINAL);
+  mazda_tja_button = GET_FLAG(param, MAZDA_PARAM_TJA);
+  mazda_tja_button_released = false;
+  mads_physical_button_only = mazda_tja_button;
   acc_main_on = false;
+  mads_button_press = MADS_BUTTON_UNAVAILABLE;
 
   return mazda_longitudinal ? BUILD_SAFETY_CFG(mazda_long_rx_checks, MAZDA_LONG_TX_MSGS) :
                               BUILD_SAFETY_CFG(mazda_rx_checks, MAZDA_TX_MSGS);
