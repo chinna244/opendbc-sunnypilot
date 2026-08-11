@@ -29,7 +29,6 @@ class CarState(CarStateBase, CarStateExt):
     self.decel_button = 0
     self.cancel_button = 0
     self.resume_button = 0
-    self.tja_button = 0
     self.main_button = 0
 
     self.cruise_available = False
@@ -181,13 +180,12 @@ class CarState(CarStateBase, CarStateExt):
     self.cam_laneinfo = cp_cam.vl["CAM_LANEINFO"]
     ret.steerFaultPermanent = cp_cam.vl["CAM_LKAS"]["ERR_BIT_1"] == 1
 
-    # cruise control button events: distance, inc, dec, resume, cancel, TJA/LKAS, and main
+    # cruise control button events: distance, inc, dec, resume, cancel, and main
     prev_distance_button = self.distance_button
     prev_accel_button = self.accel_button
     prev_decel_button = self.decel_button
     prev_cancel_button = self.cancel_button
     prev_resume_button = self.resume_button
-    prev_tja_button = self.tja_button
     prev_main_button = self.main_button
     self.distance_button = cp.vl["CRZ_BTNS"]["DISTANCE_LESS"]
     # On CX-5 2022 the wheel "+" button toggles SET_P (not RES); RES is the resume button.
@@ -199,13 +197,7 @@ class CarState(CarStateBase, CarStateExt):
     # body ECU treats the latest non-cancel frame as authoritative. Critical for cancel-safety.
     self.cancel_button = cp.vl["CRZ_BTNS"]["CAN_OFF"]
     self.resume_button = cp.vl["CRZ_BTNS"]["RES"]
-    # Decode both Mazda steering-wheel generations from the signal actually sent.
-    # Newer wheels use MRCC_BUTTON; legacy wheels use MODE_X + MODE_Y.
-    self.tja_button = cp.vl["CRZ_BTNS"]["TJA_BUTTON"]
-    self.main_button = int(
-      cp.vl["CRZ_BTNS"]["MRCC_BUTTON"] == 1 or
-      (cp.vl["CRZ_BTNS"]["MODE_X"] == 1 and cp.vl["CRZ_BTNS"]["MODE_Y"] == 1)
-    )
+    self.main_button = int(cp.vl["CRZ_BTNS"]["MODE_X"] == 1 and cp.vl["CRZ_BTNS"]["MODE_Y"] == 1)
 
     ret.buttonEvents = [
       *create_button_events(self.distance_button, prev_distance_button, {1: ButtonType.gapAdjustCruise}),
@@ -213,7 +205,6 @@ class CarState(CarStateBase, CarStateExt):
       *create_button_events(self.decel_button, prev_decel_button, {1: ButtonType.decelCruise}),
       *create_button_events(self.cancel_button, prev_cancel_button, {1: ButtonType.cancel}),
       *create_button_events(self.resume_button, prev_resume_button, {1: ButtonType.resumeCruise}),
-      *create_button_events(self.tja_button, prev_tja_button, {1: ButtonType.lkas}),
       *create_button_events(self.main_button, prev_main_button, {1: ButtonType.mainCruise}),
     ]
 
