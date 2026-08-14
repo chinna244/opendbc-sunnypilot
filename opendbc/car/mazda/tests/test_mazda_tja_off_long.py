@@ -141,6 +141,9 @@ def _laneinfo_tja(tja, transition=0):
 
 def _step(ctrl, lat, **kw):
   CC_SP = structs.CarControlSP()
+  # HUD packing reads CC_SP.mads.enabled. Default matches lat so existing
+  # MADS-on HUD passthrough tests keep current TJA copy behavior.
+  CC_SP.mads.enabled = bool(kw.pop("mads_enabled", lat))
   _, sends = ctrl.update(_cc(lat, cancel=kw.pop("op_cancel", False),
                              resume=kw.pop("resume", False),
                              enabled=kw.pop("cc_enabled", False),
@@ -650,12 +653,59 @@ class TestTjaMadsOnlyIndependence(unittest.TestCase):
     for available, enabled in ((False, False), (True, False)):
       ctrl = _controller(alpha_long)
       crz, sends = _hud_step(ctrl, True, available=available, enabled=enabled,
+                             mads_enabled=True,
                              cam_laneinfo=_laneinfo_tja(2, transition=2))
       assert crz == []
       li = _decode_laneinfo(sends)
       assert len(li) == 1
       assert li[0]["TJA"] == 2
       assert li[0]["TJA_TRANSITION"] == 2
+
+  def test_hud_stage2a_mads_off_forces_tja0(self, alpha_long):
+    """Event 38: MADS OFF + MRCC ARMED must not copy FSC TJA=2/3/4."""
+    cases = (
+      (False, False, 0, 0),
+      (False, False, 2, 0),
+      (True, False, 2, 0),   # Event 38
+      (True, False, 3, 0),
+      (True, False, 4, 0),
+    )
+    for available, enabled, fsc_tja, _ in cases:
+      ctrl = _controller(alpha_long)
+      cam = _laneinfo_tja(fsc_tja, transition=2)
+      cam["LANE_LINES"] = 3
+      crz, sends = _hud_step(ctrl, False, available=available, enabled=enabled,
+                             mads_enabled=False, cam_laneinfo=cam)
+      assert crz == []
+      li = _decode_laneinfo(sends)
+      assert len(li) == 1
+      assert li[0]["TJA"] == 0, (available, enabled, fsc_tja)
+      assert li[0]["TJA_TRANSITION"] == 2
+      assert li[0]["LANE_LINES"] == 3
+      assert not any(a == CRZ_BTNS for a, _, _ in sends)
+      assert any(a == CAM_LKAS for a, _, _ in sends)
+
+  def test_hud_stage2a_does_not_change_crz_or_lkas(self, alpha_long):
+    cam = _laneinfo_tja(2, transition=2)
+    kw = dict(available=True, enabled=False, cam_laneinfo=cam)
+    crz_off, sends_off = _hud_step(_controller(alpha_long), False, mads_enabled=False, **kw)
+    crz_on, sends_on = _hud_step(_controller(alpha_long), False, mads_enabled=True, **kw)
+    assert crz_off == []
+    assert crz_on == []
+    addrs_off = sorted((a, b) for a, _, b in sends_off)
+    addrs_on = sorted((a, b) for a, _, b in sends_on)
+    assert addrs_off == addrs_on
+    lkas_off = [dat for a, dat, _ in sends_off if a == CAM_LKAS]
+    lkas_on = [dat for a, dat, _ in sends_on if a == CAM_LKAS]
+    assert lkas_off == lkas_on
+    btns_off = [dat for a, dat, _ in sends_off if a == CRZ_BTNS]
+    btns_on = [dat for a, dat, _ in sends_on if a == CRZ_BTNS]
+    assert btns_off == btns_on
+    li_off = _decode_laneinfo(sends_off)
+    li_on = _decode_laneinfo(sends_on)
+    assert li_off[0]["TJA"] == 0
+    assert li_on[0]["TJA"] == 2
+    assert li_off[0]["TJA_TRANSITION"] == li_on[0]["TJA_TRANSITION"] == 2
 
   @parametrize("tja", [0, 1])
   def test_hud_non_engaged_tja_passthrough_while_active(self, alpha_long, tja):

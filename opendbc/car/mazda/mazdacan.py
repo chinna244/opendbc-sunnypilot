@@ -141,7 +141,7 @@ def create_steering_control(packer, CP, frame, apply_torque, lkas):
 
 
 def create_alert_command(packer, cam_msg: dict, ldw: bool, steer_required: bool,
-                         mrcc_active: bool = False):
+                         mrcc_active: bool = False, mads_enabled: bool = True):
   values = {s: cam_msg[s] for s in [
     "LINE_VISIBLE",
     "LINE_NOT_VISIBLE",
@@ -164,7 +164,7 @@ def create_alert_command(packer, cam_msg: dict, ldw: bool, steer_required: bool,
     "LDW_WARN_LL": 0,
     "LDW_WARN_RL": 0,
   })
-  # Preserve camera TJA / TJA_TRANSITION when present. Do not invent TJA from MADS.
+  # Preserve camera TJA / TJA_TRANSITION when present. Do not invent TJA from MADS-on.
   for sig in ("TJA", "TJA_TRANSITION"):
     if sig in cam_msg:
       values[sig] = cam_msg[sig]
@@ -174,6 +174,11 @@ def create_alert_command(packer, cam_msg: dict, ldw: bool, steer_required: bool,
   # Event 28 kept ACTIVE with TJA=0. Never pack 2/3/4 while ACTIVE. Leave
   # TJA_TRANSITION / LANE_LINES / other HUD fields unchanged.
   if mrcc_active and int(values.get("TJA", 0) or 0) in (2, 3, 4):
+    values["TJA"] = 0
+  # Stage 2A HUD ownership. MADS disabled must not present OEM TJA on bus 0.
+  # Event 38: MADS OFF + MRCC ARMED copied FSC TJA=2 for ~4.3s. Do not map
+  # MADS-on / latActive onto TJA=2/3/4, and do not rewrite TJA_TRANSITION.
+  if not mads_enabled:
     values["TJA"] = 0
   return packer.make_can_msg("CAM_LANEINFO", 0, values)
 

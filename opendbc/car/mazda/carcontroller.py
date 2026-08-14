@@ -249,9 +249,11 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       # TODO: find a way to silence audible warnings so we can add more hud alerts
       steer_required = steer_required and CS.lkas_allowed_speed
       # MRCC ACTIVE must never pack CAM_LANEINFO.TJA in {2,3,4} (OEM TJA-engaged).
+      # MADS disabled must pack TJA=0 (Stage 2A HUD ownership; Event 38 leak).
+      # Presentation plumbing only: CC_SP.mads.enabled is not a MADS/MRCC state change.
       can_sends.append(mazdacan.create_alert_command(
         self.packer, CS.cam_laneinfo, ldw, steer_required,
-        bool(CS.out.cruiseState.enabled)))
+        bool(CS.out.cruiseState.enabled), bool(CC_SP.mads.enabled)))
 
     # send steering command
     can_sends.append(mazdacan.create_steering_control(self.packer, self.CP,

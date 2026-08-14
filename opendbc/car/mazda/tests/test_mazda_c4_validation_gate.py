@@ -572,20 +572,23 @@ class TestCamLaneinfoExhaustive(unittest.TestCase):
             li = _decode_laneinfo(sends)
             assert len(li) == 1
             packed = li[0]["TJA"]
-            if mrcc == "ACTIVE":
+            if not mads:
+              expected = 0
+            elif mrcc == "ACTIVE":
               expected = 0 if tja in (2, 3, 4) else tja
-              if packed != expected:
-                tja2_active += 1
-                invalid += 1
             else:
-              if packed != tja:
-                invalid += 1
+              expected = tja
+            if packed != expected:
+              if mrcc == "ACTIVE" and expected == 0:
+                tja2_active += 1
+              invalid += 1
             if li[0]["TJA_TRANSITION"] != trans:
               invalid += 1
             if li[0]["LANE_LINES"] != 3:
               invalid += 1
             # packer-level clamp matches controller
-            msg = create_alert_command(packer, cam, False, False, mrcc_active=(mrcc == "ACTIVE"))
+            msg = create_alert_command(packer, cam, False, False,
+                                       mrcc_active=(mrcc == "ACTIVE"), mads_enabled=mads)
             assert msg[0] == 0x440
     assert tja2_active == 0
     assert invalid == 0
