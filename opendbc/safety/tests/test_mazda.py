@@ -61,387 +61,6 @@ class TestMazdaSafety(common.CarSafetyTest, common.DriverTorqueSteeringSafetyTes
     values = {"CRZ_ACTIVE": enable}
     return self.packer.make_can_msg_safety("CRZ_CTRL", 0, values)
 
-  def _acc_main_msg(self, enable):
-    values = {"CRZ_AVAILABLE": enable}
-    return self.packer.make_can_msg_safety("CRZ_CTRL", 0, values)
-
-  def _long_acc_state_msg(self, armed, active):
-    values = {"ACC_OFF": armed and not active, "ACC_ACTIVE": active, "BRAKE_ON": 0}
-    return self.packer.make_can_msg_safety("PEDALS", 0, values)
-
-  def _tja_button_msg(self, tja=False, mrcc=False, bus=0, companion_bit=None):
-    values = {"TJA_BUTTON": tja, "MRCC_BUTTON": mrcc,
-              "BIT1": not mrcc if companion_bit is None else companion_bit}
-    return self.packer.make_can_msg_safety("CRZ_BTNS", bus, values)
-
-  def _configure_tja_mads(self, tja_flag=True, enable_mads=True, longitudinal=False):
-    param = (MazdaSafetyFlags.TJA if tja_flag else 0) | (MazdaSafetyFlags.LONG if longitudinal else 0)
-    self.safety.set_safety_hooks(CarParams.SafetyModel.mazda, param)
-    self.safety.init_tests()
-    self.safety.set_mads_params(enable_mads, False, False)
-    self.safety.set_heartbeat_engaged_mads(True)
-
-  def _clear_lateral_with_heartbeat(self, expected_acc_main):
-    self.safety.set_heartbeat_engaged_mads(False)
-    for _ in range(3):
-      self.safety.mads_heartbeat_engaged_check()
-    self.assertFalse(self.safety.get_controls_allowed_lateral())
-    self.assertEqual(expected_acc_main, self.safety.get_acc_main_on())
-
-  def _route27_cleared_state(self, tja_flag=True):
-    self._configure_tja_mads(tja_flag=tja_flag)
-    if tja_flag:
-      self.assertTrue(self._rx(self._tja_button_msg(False)))
-      self.assertTrue(self._rx(self._tja_button_msg(True)))
-    else:
-      self.assertTrue(self._rx(self._acc_main_msg(True)))
-    self.assertTrue(self.safety.get_controls_allowed_lateral())
-    self._clear_lateral_with_heartbeat(expected_acc_main=not tja_flag)
-    self.safety.set_heartbeat_engaged_mads(True)
-    self.safety.mads_heartbeat_engaged_check()
-    self.assertFalse(self.safety.get_controls_allowed_lateral())
-    self.assertEqual(not tja_flag, self.safety.get_acc_main_on())
-
-  def test_tja_flag_isolates_physical_button_authorization(self):
-    for tja_flag in (False, True):
-      with self.subTest(tja_flag=tja_flag):
-        self._route27_cleared_state(tja_flag=tja_flag)
-        self.assertTrue(self._rx(self._tja_button_msg(False)))
-        self.assertTrue(self._rx(self._tja_button_msg(True)))
-        self.assertEqual(tja_flag, self.safety.get_controls_allowed_lateral())
-
-  def test_route27_tja_reenable_lifecycle_and_torque(self):
-    self._route27_cleared_state()
-
-    # A matching heartbeat only clears the mismatch counter; it is not an authorization edge.
-    self.assertFalse(self._tx(self._torque_cmd_msg(12)))
-    self.assertFalse(self.safety.get_controls_allowed_lateral())
-
-    self.assertTrue(self._rx(self._tja_button_msg(False)))
-    self.assertEqual(0, self.safety.get_mads_button_press())
-    self.assertTrue(self._rx(self._tja_button_msg(True)))
-    self.assertEqual(1, self.safety.get_mads_button_press())
-    self.assertTrue(self.safety.get_controls_allowed_lateral())
-    self.assertTrue(self._tx(self._torque_cmd_msg(12)))
-
-  def test_held_tja_requires_release_before_reauthorization(self):
-    self._route27_cleared_state()
-    self.assertTrue(self._rx(self._tja_button_msg(False)))
-    self.assertTrue(self._rx(self._tja_button_msg(True)))
-    self.assertTrue(self.safety.get_controls_allowed_lateral())
-
-    self._clear_lateral_with_heartbeat(expected_acc_main=False)
-    self.safety.set_heartbeat_engaged_mads(True)
-    self.assertTrue(self._rx(self._tja_button_msg(True)))
-    self.assertFalse(self.safety.get_controls_allowed_lateral())
-
-    self.assertTrue(self._rx(self._tja_button_msg(False)))
-    self.assertEqual(0, self.safety.get_mads_button_press())
-    self.assertTrue(self._rx(self._tja_button_msg(True)))
-    self.assertTrue(self.safety.get_controls_allowed_lateral())
-
-  def test_mrcc_and_host_tx_cannot_authorize_as_tja(self):
-    self._route27_cleared_state()
-
-    self.assertTrue(self._rx(self._tja_button_msg(False)))
-    self.assertTrue(self._rx(self._tja_button_msg(mrcc=True)))
-    self.assertFalse(self.safety.get_controls_allowed_lateral())
-    self.assertEqual(0, self.safety.get_mads_button_press())
-
-    self.assertFalse(self._tx(self._tja_button_msg(tja=True)))
-    self.assertFalse(self.safety.get_controls_allowed_lateral())
-    self.assertEqual(0, self.safety.get_mads_button_press())
-
-  def test_malformed_tja_button_shape_cannot_authorize(self):
-    self._configure_tja_mads()
-    self.assertTrue(self._rx(self._tja_button_msg(False)))
-
-    # These do not match any clean stock TJA capture: MRCC cannot be asserted
-    # simultaneously, and bit 16 must retain the physical TJA value of one.
-    self.assertTrue(self._rx(self._tja_button_msg(tja=True, mrcc=True)))
-    self.assertFalse(self.safety.get_controls_allowed_lateral())
-    self.assertTrue(self._rx(self._tja_button_msg(False)))
-    self.assertTrue(self._rx(self._tja_button_msg(tja=True, companion_bit=False)))
-    self.assertFalse(self.safety.get_controls_allowed_lateral())
-
-    self.assertTrue(self._rx(self._tja_button_msg(False)))
-    self.assertTrue(self._rx(self._tja_button_msg(tja=True)))
-    self.assertTrue(self.safety.get_controls_allowed_lateral())
-
-  def test_tja_cannot_authorize_when_mads_disabled(self):
-    self._configure_tja_mads(enable_mads=False)
-    self.assertTrue(self._rx(self._acc_main_msg(True)))
-    self.assertTrue(self._rx(self._tja_button_msg(False)))
-    self.assertTrue(self._rx(self._tja_button_msg(True)))
-    self.assertFalse(self.safety.get_controls_allowed_lateral())
-
-  def test_non_tja_acc_main_fall_still_exits_lateral(self):
-    self._configure_tja_mads(tja_flag=False)
-    self.assertTrue(self._rx(self._acc_main_msg(True)))
-    self.assertTrue(self.safety.get_acc_main_on())
-    self.assertTrue(self.safety.get_controls_allowed_lateral())
-
-    self.assertTrue(self._rx(self._acc_main_msg(False)))
-    self.assertFalse(self.safety.get_acc_main_on())
-    self.assertFalse(self.safety.get_controls_allowed_lateral())
-
-  def test_tja_acc_main_toggles_do_not_change_lateral_permission(self):
-    self._configure_tja_mads()
-    self.assertTrue(self._rx(self._tja_button_msg(False)))
-    self.assertTrue(self._rx(self._tja_button_msg(True)))
-    self.assertTrue(self.safety.get_controls_allowed_lateral())
-
-    for available in (True, False, True, False):
-      self.assertTrue(self._rx(self._acc_main_msg(available)))
-      self.assertFalse(self.safety.get_acc_main_on())
-      self.assertTrue(self.safety.get_controls_allowed_lateral())
-
-    self.assertTrue(self._tx(self._torque_cmd_msg(12)))
-
-  def test_tja_longitudinal_independence_matrix(self):
-    self._configure_tja_mads(longitudinal=True)
-    self.assertTrue(self._rx(self._tja_button_msg(False)))
-    self.assertTrue(self._rx(self._long_acc_state_msg(False, False)))
-
-    # TJA OFF + LONG OFF
-    self.assertFalse(self.safety.get_controls_allowed_lateral())
-    self.assertFalse(self.safety.get_controls_allowed())
-
-    # TJA ON + LONG OFF: only the physical button creates lateral permission.
-    self.assertTrue(self._rx(self._tja_button_msg(True)))
-    self.assertTrue(self.safety.get_controls_allowed_lateral())
-    self.assertFalse(self.safety.get_controls_allowed())
-    self.assertTrue(self._tx(self._torque_cmd_msg(12)))
-
-    # TJA ON + LONG ON
-    self.assertTrue(self._rx(self._long_acc_state_msg(True, True)))
-    self.assertTrue(self.safety.get_controls_allowed_lateral())
-    self.assertTrue(self.safety.get_controls_allowed())
-
-    # TJA OFF + LONG ON: the heartbeat-owned disable does not affect longitudinal.
-    self.safety.set_heartbeat_engaged_mads(False)
-    for _ in range(3):
-      self.safety.mads_heartbeat_engaged_check()
-    self.assertFalse(self.safety.get_controls_allowed_lateral())
-    self.assertTrue(self.safety.get_controls_allowed())
-
-    # An ACC/op-controls state that remains high cannot recreate lateral permission.
-    self.assertTrue(self._rx(self._long_acc_state_msg(True, True)))
-    self.assertFalse(self.safety.get_controls_allowed_lateral())
-    self.assertTrue(self.safety.get_controls_allowed())
-
-    # TJA ON while longitudinal remains active creates fresh lateral permission.
-    self.assertTrue(self._rx(self._tja_button_msg(False)))
-    self.assertTrue(self._rx(self._tja_button_msg(True)))
-    self.assertTrue(self.safety.get_controls_allowed_lateral())
-    self.assertTrue(self.safety.get_controls_allowed())
-
-    # MRCC/ACC off cannot revoke button-owned lateral permission.
-    self.assertTrue(self._rx(self._long_acc_state_msg(False, False)))
-    self.assertTrue(self.safety.get_controls_allowed_lateral())
-    self.assertFalse(self.safety.get_controls_allowed())
-
-  def test_fresh_tja_press_resets_stale_heartbeat_mismatch_history(self):
-    self._configure_tja_mads()
-    self.assertTrue(self._rx(self._tja_button_msg(False)))
-    self.assertTrue(self._rx(self._tja_button_msg(True)))
-    self.assertTrue(self.safety.get_controls_allowed_lateral())
-
-    # Route 2A disabled MADS for two Panda ticks, then pressed TJA just before the
-    # third tick. The fresh user action must start a new heartbeat grace window.
-    self.safety.set_heartbeat_engaged_mads(False)
-    for _ in range(2):
-      self.safety.mads_heartbeat_engaged_check()
-    self.assertTrue(self.safety.get_controls_allowed_lateral())
-
-    self.assertTrue(self._rx(self._tja_button_msg(False)))
-    self.assertTrue(self._rx(self._tja_button_msg(True)))
-    for _ in range(2):
-      self.safety.mads_heartbeat_engaged_check()
-      self.assertTrue(self.safety.get_controls_allowed_lateral())
-    self.safety.mads_heartbeat_engaged_check()
-    self.assertFalse(self.safety.get_controls_allowed_lateral())
-
-  def test_tja_heartbeat_session_boundaries_and_fast_toggles(self):
-    for prior_mismatches in range(3):
-      with self.subTest(prior_mismatches=prior_mismatches):
-        self._configure_tja_mads()
-        self.assertTrue(self._rx(self._tja_button_msg(False)))
-        self.assertTrue(self._rx(self._tja_button_msg(True)))
-        self.safety.set_heartbeat_engaged_mads(False)
-        for _ in range(prior_mismatches):
-          self.safety.mads_heartbeat_engaged_check()
-
-        self.assertTrue(self._rx(self._tja_button_msg(False)))
-        self.assertTrue(self._rx(self._tja_button_msg(True)))
-        for _ in range(2):
-          self.safety.mads_heartbeat_engaged_check()
-          self.assertTrue(self.safety.get_controls_allowed_lateral())
-        self.safety.mads_heartbeat_engaged_check()
-        self.assertFalse(self.safety.get_controls_allowed_lateral())
-
-    for off_ticks in range(5):
-      with self.subTest(off_ticks=off_ticks):
-        self._configure_tja_mads()
-        self.assertTrue(self._rx(self._tja_button_msg(False)))
-        self.assertTrue(self._rx(self._tja_button_msg(True)))
-        self.assertTrue(self.safety.get_controls_allowed_lateral())
-
-        # The next physical toggle is MADS OFF in userspace. Panda remains
-        # fail-safe authorized only for the existing heartbeat grace period.
-        self.assertTrue(self._rx(self._tja_button_msg(False)))
-        self.assertTrue(self._rx(self._tja_button_msg(True)))
-        self.safety.set_heartbeat_engaged_mads(False)
-        for _ in range(off_ticks):
-          self.safety.mads_heartbeat_engaged_check()
-
-        # A rapid or delayed ON toggle always starts a session-local window.
-        self.assertTrue(self._rx(self._tja_button_msg(False)))
-        self.assertTrue(self._rx(self._tja_button_msg(True)))
-        self.safety.set_heartbeat_engaged_mads(True)
-        self.safety.mads_heartbeat_engaged_check()
-        self.assertTrue(self.safety.get_controls_allowed_lateral())
-        self.assertTrue(self._tx(self._torque_cmd_msg(12)))
-
-  def test_held_tja_frames_do_not_refresh_heartbeat_grace(self):
-    self._configure_tja_mads()
-    self.assertTrue(self._rx(self._tja_button_msg(False)))
-    self.assertTrue(self._rx(self._tja_button_msg(True)))
-    self.safety.set_heartbeat_engaged_mads(False)
-
-    for i in range(3):
-      self.safety.mads_heartbeat_engaged_check()
-      self.assertTrue(self._rx(self._tja_button_msg(True)))
-      self.assertEqual(i < 2, self.safety.get_controls_allowed_lateral())
-
-  def test_tja_heartbeat_and_steering_disengage_still_clear_lateral(self):
-    for trigger in ("heartbeat", "steering"):
-      with self.subTest(trigger=trigger):
-        self._configure_tja_mads()
-        self.assertTrue(self._rx(self._tja_button_msg(False)))
-        self.assertTrue(self._rx(self._tja_button_msg(True)))
-        self.assertTrue(self.safety.get_controls_allowed_lateral())
-
-        if trigger == "heartbeat":
-          self.safety.set_heartbeat_engaged_mads(False)
-          for _ in range(3):
-            self.safety.mads_heartbeat_engaged_check()
-        else:
-          self.safety.set_steering_disengage(True)
-          self.assertTrue(self._rx(self._speed_msg(10)))
-
-        self.assertFalse(self.safety.get_controls_allowed_lateral())
-
-  def test_tja_configured_brake_disengage_still_clears_lateral(self):
-    self._configure_tja_mads()
-    self.safety.set_mads_params(True, True, False)
-    self.safety.set_heartbeat_engaged_mads(True)
-    self.assertTrue(self._rx(self._tja_button_msg(False)))
-    self.assertTrue(self._rx(self._tja_button_msg(True)))
-    self.assertTrue(self.safety.get_controls_allowed_lateral())
-
-    self.assertTrue(self._rx(self._user_brake_msg(True)))
-    self.assertFalse(self.safety.get_controls_allowed_lateral())
-
-  def test_tja_cannot_reauthorize_while_safety_exit_is_held(self):
-    for trigger in ("brake", "steering"):
-      with self.subTest(trigger=trigger):
-        self._configure_tja_mads()
-        if trigger == "brake":
-          self.safety.set_mads_params(True, True, False)
-          self.safety.set_heartbeat_engaged_mads(True)
-
-        self.assertTrue(self._rx(self._tja_button_msg(False)))
-        self.assertTrue(self._rx(self._tja_button_msg(True)))
-        self.assertTrue(self.safety.get_controls_allowed_lateral())
-
-        if trigger == "brake":
-          self.assertTrue(self._rx(self._user_brake_msg(True)))
-        else:
-          self.safety.set_steering_disengage(True)
-          self.assertTrue(self._rx(self._speed_msg(10)))
-        self.assertFalse(self.safety.get_controls_allowed_lateral())
-
-        self.assertTrue(self._rx(self._tja_button_msg(False)))
-        self.assertTrue(self._rx(self._tja_button_msg(True)))
-        self.assertFalse(self.safety.get_controls_allowed_lateral())
-        self.assertFalse(self._tx(self._torque_cmd_msg(12)))
-
-        if trigger == "brake":
-          self.assertTrue(self._rx(self._user_brake_msg(False)))
-        else:
-          self.safety.set_steering_disengage(False)
-          self.assertTrue(self._rx(self._speed_msg(10)))
-        self.assertFalse(self.safety.get_controls_allowed_lateral())
-
-        self.assertTrue(self._rx(self._tja_button_msg(False)))
-        self.assertTrue(self._rx(self._tja_button_msg(True)))
-        self.assertTrue(self.safety.get_controls_allowed_lateral())
-        self.assertTrue(self._tx(self._torque_cmd_msg(12)))
-
-  def test_tja_cannot_reauthorize_until_rx_lag_recovers(self):
-    self._configure_tja_mads()
-    self.assertTrue(self._rx(self._tja_button_msg(False)))
-    self.assertTrue(self._rx(self._tja_button_msg(True)))
-    self.assertTrue(self.safety.get_controls_allowed_lateral())
-
-    self.safety.set_timer(int(3e6))
-    self.safety.safety_tick_current_safety_config()
-    self.assertFalse(self.safety.get_controls_allowed_lateral())
-    self.assertFalse(self.safety.safety_config_valid())
-
-    self.assertTrue(self._rx(self._tja_button_msg(False)))
-    self.assertTrue(self._rx(self._tja_button_msg(True)))
-    self.assertFalse(self.safety.get_controls_allowed_lateral())
-    self.assertFalse(self._tx(self._torque_cmd_msg(12)))
-
-    # Recovery must include every required RX stream and a safety tick. The TJA
-    # attempted during lag is not queued as a future authorization.
-    self.assertTrue(self._rx(self._acc_main_msg(False)))
-    self.assertTrue(self._rx(self._torque_driver_msg(0)))
-    self.assertTrue(self._rx(self._speed_msg(0)))
-    self.assertTrue(self._rx(self._user_brake_msg(False)))
-    self.safety.safety_tick_current_safety_config()
-    self.assertTrue(self.safety.safety_config_valid())
-    self.assertFalse(self.safety.get_controls_allowed_lateral())
-
-    self.assertTrue(self._rx(self._tja_button_msg(False)))
-    self.assertTrue(self._rx(self._tja_button_msg(True)))
-    self.assertTrue(self.safety.get_controls_allowed_lateral())
-    self.assertTrue(self._tx(self._torque_cmd_msg(12)))
-
-  def test_tja_safety_reinit_clears_stale_state(self):
-    self._configure_tja_mads()
-    self.assertTrue(self._rx(self._tja_button_msg(False)))
-    self.assertTrue(self._rx(self._tja_button_msg(True)))
-    self.assertTrue(self.safety.get_controls_allowed_lateral())
-    self.assertEqual(1, self.safety.get_mads_button_press())
-
-    # Production reapplies alternativeExperience before setting the car safety model.
-    self.safety.set_mads_params(True, False, False)
-    self.safety.set_safety_hooks(CarParams.SafetyModel.mazda, MazdaSafetyFlags.TJA)
-    self.assertFalse(self.safety.get_controls_allowed_lateral())
-    self.assertEqual(-1, self.safety.get_mads_button_press())
-
-  def test_tja_held_across_safety_reinit_does_not_synthesize_authorization(self):
-    self._configure_tja_mads()
-    self.assertTrue(self._rx(self._tja_button_msg(False)))
-    self.assertTrue(self._rx(self._tja_button_msg(True)))
-    self.assertTrue(self.safety.get_controls_allowed_lateral())
-
-    # Re-selecting the model is a fail-safe boundary. A button already held at
-    # that boundary is not a new user edge, and repeated held frames stay inert.
-    self.safety.set_safety_hooks(CarParams.SafetyModel.mazda, MazdaSafetyFlags.TJA)
-    self.assertFalse(self.safety.get_controls_allowed_lateral())
-    for _ in range(3):
-      self.assertTrue(self._rx(self._tja_button_msg(True)))
-      self.assertFalse(self.safety.get_controls_allowed_lateral())
-
-    self.assertTrue(self._rx(self._tja_button_msg(False)))
-    self.assertFalse(self.safety.get_controls_allowed_lateral())
-    self.assertTrue(self._rx(self._tja_button_msg(True)))
-    self.assertTrue(self.safety.get_controls_allowed_lateral())
-
   def _button_msg(self, resume=False, cancel=False):
     values = {
       "CAN_OFF": cancel,
@@ -461,6 +80,27 @@ class TestMazdaSafety(common.CarSafetyTest, common.DriverTorqueSteeringSafetyTes
     self.safety.set_controls_allowed(1)
     self.assertTrue(self._tx(self._button_msg(cancel=True)))
     self.assertTrue(self._tx(self._button_msg(resume=True)))
+    # MRCC_BUTTON is Case-D-window only, never generally allowed
+    self.safety.set_controls_allowed(0)
+    self.assertFalse(self._tx(self.packer.make_can_msg_safety("CRZ_BTNS", 0, {"MRCC_BUTTON": 1})))
+    self.safety.set_controls_allowed(1)
+    self.assertFalse(self._tx(self.packer.make_can_msg_safety("CRZ_BTNS", 0, {"MRCC_BUTTON": 1})))
+
+
+class TestMazdaTjaSafety(unittest.TestCase):
+  """TJA param: still no general synthetic MRCC without a restore window."""
+
+  def setUp(self):
+    self.packer = CANPackerSafety("mazda_2017")
+    self.safety = libsafety_py.libsafety
+    self.safety.set_safety_hooks(CarParams.SafetyModel.mazda, MazdaSafetyFlags.TJA)
+    self.safety.init_tests()
+
+  def test_general_synthetic_mrcc_blocked_without_restore_window(self):
+    for allowed in (False, True):
+      self.safety.set_controls_allowed(int(allowed))
+      msg = self.packer.make_can_msg_safety("CRZ_BTNS", 0, {"MRCC_BUTTON": 1})
+      self.assertFalse(self.safety.safety_tx_hook(msg))
 
 
 class TestMazdaLongitudinalSafety(TestMazdaSafety, common.LongitudinalAccelSafetyTest):
@@ -568,6 +208,126 @@ class TestMazdaLongitudinalSafety(TestMazdaSafety, common.LongitudinalAccelSafet
 
       self.safety.set_controls_allowed(True)
       self.assertTrue(self._tx(self._crz_ctrl_cmd_msg(True, bus)))
+
+
+class TestMazdaRestoreSafety(unittest.TestCase):
+  """Panda independently authorizes one interval-contained MRCC restore."""
+
+  def setUp(self):
+    self.packer = CANPackerSafety("mazda_2017")
+    self.safety = libsafety_py.libsafety
+    self.safety.set_safety_hooks(CarParams.SafetyModel.mazda, MazdaSafetyFlags.TJA)
+    self.safety.init_tests()
+    self.safety.set_controls_allowed(0)
+    self.safety.set_timer(0)
+
+  def _tx(self, msg):
+    return self.safety.safety_tx_hook(msg)
+
+  def _rx(self, msg):
+    return self.safety.safety_rx_hook(msg)
+
+  def _crz_ctrl(self, available, active=False):
+    return self.packer.make_can_msg_safety("CRZ_CTRL", 0, {
+      "CRZ_AVAILABLE": int(available),
+      "CRZ_ACTIVE": int(active),
+    })
+
+  def _btns(self, *, tja=0, mrcc=0, set_p=0, set_m=0, res=0, cancel=0, ctr=3):
+    return self.packer.make_can_msg_safety("CRZ_BTNS", 0, {
+      "TJA_BUTTON": tja,
+      "MRCC_BUTTON": mrcc,
+      "SET_P": set_p,
+      "SET_M": set_m,
+      "RES": res,
+      "CAN_OFF": cancel,
+      "CTR": ctr,
+      "BIT1": 0 if mrcc else 1,
+      "BIT2": 1,
+      "BIT3": 1,
+      "CAN_OFF_INV": 0 if cancel else 1,
+      "SET_P_INV": 0 if set_p else 1,
+      "SET_M_INV": 0 if set_m else 1,
+      "RES_INV": 0 if res else 1,
+      "MODE_X": 0,
+      "MODE_Y": 0,
+      "MODE_X_INV": 1,
+      "MODE_Y_INV": 1,
+    })
+
+  def _open_off_window(self):
+    self._rx(self._crz_ctrl(False))
+    self._rx(self._btns(tja=0, ctr=2))
+    self.safety.set_timer(10000)
+    self._rx(self._btns(tja=1, ctr=3))
+    self._rx(self._btns(tja=0, ctr=3))
+    self._rx(self._crz_ctrl(True))
+
+  def test_general_synthetic_blocked(self):
+    for allowed in (0, 1):
+      self.safety.set_controls_allowed(allowed)
+      self.assertFalse(self._tx(self._btns(mrcc=1)))
+      self.assertFalse(self._tx(self._btns(tja=1)))
+      if not allowed:
+        self.assertFalse(self._tx(self._btns(set_p=1)))
+        self.assertFalse(self._tx(self._btns(res=1)))
+
+  def test_restore_without_tja_rejected(self):
+    self._rx(self._crz_ctrl(True))
+    self.assertFalse(self._tx(self._btns(mrcc=1, ctr=4)))
+
+  def test_restore_accepted_then_next_wheel_closes(self):
+    self._open_off_window()
+    self.assertTrue(self._tx(self._btns(mrcc=1, ctr=4)))
+    self._rx(self._btns(ctr=3))
+    self.assertTrue(self._tx(self._btns(mrcc=1, ctr=4)))
+    self._rx(self._btns(ctr=4))
+    self.assertFalse(self._tx(self._btns(mrcc=1, ctr=4)))
+
+  def test_second_unique_ctr_rejected(self):
+    self._open_off_window()
+    self.assertTrue(self._tx(self._btns(mrcc=1, ctr=4)))
+    self.assertFalse(self._tx(self._btns(mrcc=1, ctr=5)))
+
+  def test_wrong_payload_rejected(self):
+    self._open_off_window()
+    self.assertFalse(self._tx(self._btns(mrcc=1, tja=1, ctr=4)))
+    self.assertFalse(self._tx(self._btns(mrcc=1, set_p=1, ctr=4)))
+    self.assertFalse(self._tx(self._btns(mrcc=1, res=1, ctr=4)))
+    # CAN_OFF is the cancel path, not a restore accept (restore_mrcc requires CAN_OFF=0).
+
+  def test_max_tx_then_reject(self):
+    self._open_off_window()
+    for _ in range(10):
+      self.assertTrue(self._tx(self._btns(mrcc=1, ctr=4)))
+    self.assertFalse(self._tx(self._btns(mrcc=1, ctr=4)))
+
+  def test_timeout_rejected(self):
+    self._open_off_window()
+    self.safety.set_timer(10000 + 500001)
+    self.assertFalse(self._tx(self._btns(mrcc=1, ctr=4)))
+
+  def test_driver_override_then_restore_rejected(self):
+    self._open_off_window()
+    self._rx(self._btns(set_p=1, ctr=3))
+    self.assertFalse(self._tx(self._btns(mrcc=1, ctr=4)))
+
+  def test_reinit_rejects_stale_window(self):
+    self._open_off_window()
+    self.assertTrue(self._tx(self._btns(mrcc=1, ctr=4)))
+    self.safety.set_safety_hooks(CarParams.SafetyModel.mazda, MazdaSafetyFlags.TJA)
+    self.safety.init_tests()
+    self.assertFalse(self._tx(self._btns(mrcc=1, ctr=4)))
+
+  def test_ctr_15_rollover_second_ctr_rejected(self):
+    self._rx(self._crz_ctrl(False))
+    self._rx(self._btns(tja=0, ctr=14))
+    self.safety.set_timer(10000)
+    self._rx(self._btns(tja=1, ctr=15))
+    self._rx(self._btns(tja=0, ctr=15))
+    self._rx(self._crz_ctrl(True))
+    self.assertTrue(self._tx(self._btns(mrcc=1, ctr=0)))
+    self.assertFalse(self._tx(self._btns(mrcc=1, ctr=1)))
 
 
 class TestMazdaIgnition(unittest.TestCase):

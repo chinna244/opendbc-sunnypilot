@@ -2,7 +2,8 @@ from opendbc.can import CANDefine, CANParser
 from opendbc.car import Bus, DT_CTRL, create_button_events, structs
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.interfaces import CarStateBase
-from opendbc.car.mazda.values import DBC, LKAS_LIMITS, CarControllerParams
+from opendbc.car.mazda.tja_edge import MazdaTjaEdge
+from opendbc.car.mazda.values import DBC, LKAS_LIMITS, CarControllerParams, MazdaSafetyFlags
 from opendbc.sunnypilot.car.mazda.carstate_ext import CarStateExt
 
 ButtonType = structs.CarState.ButtonEvent.Type
@@ -31,9 +32,28 @@ class CarState(CarStateBase, CarStateExt):
     self.resume_button = 0
     self.tja_button = 0
     self.main_button = 0
+    self._tja_edge: MazdaTjaEdge | None = None
+    self._tja_lkas_latched = False
+    self.tja_toggles_this_update = 0
+    self.tja_edge_reset = False
+    self._panda_alive = True
+    self._panda_was_dead = False
+    if CP.safetyConfigs and (CP.safetyConfigs[0].safetyParam & MazdaSafetyFlags.TJA):
+      self._tja_edge = MazdaTjaEdge()
 
     self.cruise_available = False
     self.cruise_enabled = False
+    # Previous-cycle cruise, captured before this update's CRZ_CTRL/PEDALS parse.
+    # Used as pre-TJA longitudinal state so we do not treat OEM's TJA→arm side
+    # effect as "driver already had MRCC armed".
+    self._prev_cruise_available = False
+    self._prev_cruise_enabled = False
+    self.tja_pre_cruise_available = False
+    self.tja_pre_cruise_enabled = False
+    # Driver MRCC/SET/RES/CANCEL seen since the last confirmed cruiseState change.
+    # Until CRZ_CTRL/PEDALS moves, previous-cycle OFF is stale, not confident OFF.
+    self._unconfirmed_long_btn = False
+    self.tja_pre_cruise_unknown = False
     self.brake_pressed_prev = False
     self.stock_radar_silent_frames = 0
     self.cam_laneinfo_seen = False
@@ -187,7 +207,6 @@ class CarState(CarStateBase, CarStateExt):
     prev_decel_button = self.decel_button
     prev_cancel_button = self.cancel_button
     prev_resume_button = self.resume_button
-    prev_tja_button = self.tja_button
     prev_main_button = self.main_button
     self.distance_button = cp.vl["CRZ_BTNS"]["DISTANCE_LESS"]
     # On CX-5 2022 the wheel "+" button toggles SET_P (not RES); RES is the resume button.
@@ -199,13 +218,68 @@ class CarState(CarStateBase, CarStateExt):
     # body ECU treats the latest non-cancel frame as authoritative. Critical for cancel-safety.
     self.cancel_button = cp.vl["CRZ_BTNS"]["CAN_OFF"]
     self.resume_button = cp.vl["CRZ_BTNS"]["RES"]
-    # Decode both Mazda steering-wheel generations from the signal actually sent.
-    # Newer wheels use MRCC_BUTTON; legacy wheels use MODE_X + MODE_Y.
-    self.tja_button = cp.vl["CRZ_BTNS"]["TJA_BUTTON"]
-    self.main_button = int(
-      cp.vl["CRZ_BTNS"]["MRCC_BUTTON"] == 1 or
-      (cp.vl["CRZ_BTNS"]["MODE_X"] == 1 and cp.vl["CRZ_BTNS"]["MODE_Y"] == 1)
-    )
+    # Newer CX-5 wheels use MRCC_BUTTON; legacy wheels use MODE_X + MODE_Y.
+    # Only the TJA platform reads MRCC_BUTTON so non-TJA Mazda button semantics stay unchanged.
+    if self._tja_edge is not None:
+      self.tja_button = cp.vl["CRZ_BTNS"]["TJA_BUTTON"]
+      self.main_button = int(
+        cp.vl["CRZ_BTNS"]["MRCC_BUTTON"] == 1 or
+        (cp.vl["CRZ_BTNS"]["MODE_X"] == 1 and cp.vl["CRZ_BTNS"]["MODE_Y"] == 1)
+      )
+    else:
+      self.main_button = int(cp.vl["CRZ_BTNS"]["MODE_X"] == 1 and cp.vl["CRZ_BTNS"]["MODE_Y"] == 1)
+
+    lkas_events = []
+    self.tja_toggles_this_update = 0
+    long_rise_this_update = False
+    if self._tja_edge is not None:
+      # Step the edge SM on every physical CRZ_BTNS sample (vl_all), matching Panda RX.
+      # Brake/gas/MRCC/SET/RES/CANCEL are not gesture conflicts.
+      crz_all = cp.vl_all["CRZ_BTNS"]
+      n_crz = len(crz_all["TJA_BUTTON"])
+      # Pass 1: any MRCC/SET/RES/CANCEL rise in this batch, including samples
+      # after the TJA edge. Previous-cycle OFF is then UNKNOWN, not confident OFF.
+      sm_main = prev_main_button
+      sm_set = prev_accel_button
+      sm_dec = prev_decel_button
+      sm_res = prev_resume_button
+      sm_can = prev_cancel_button
+      for i in range(n_crz):
+        main_i = int(
+          crz_all["MRCC_BUTTON"][i] == 1 or
+          (crz_all["MODE_X"][i] == 1 and crz_all["MODE_Y"][i] == 1)
+        )
+        set_i = int(crz_all["SET_P"][i])
+        dec_i = int(crz_all["SET_M"][i])
+        res_i = int(crz_all["RES"][i])
+        can_i = int(crz_all["CAN_OFF"][i])
+        if ((main_i and not sm_main) or (set_i and not sm_set) or (dec_i and not sm_dec)
+            or (res_i and not sm_res) or (can_i and not sm_can)):
+          self._unconfirmed_long_btn = True
+          long_rise_this_update = True
+        sm_main, sm_set, sm_dec, sm_res, sm_can = main_i, set_i, dec_i, res_i, can_i
+      toggle_count = 0
+      for i in range(n_crz):
+        if self._tja_edge.update(bool(crz_all["TJA_BUTTON"][i])):
+          toggle_count += 1
+      self.tja_toggles_this_update = toggle_count
+      if toggle_count:
+        # Previous-cycle cruise, not this cycle's CRZ_CTRL/PEDALS (TJA OEM arm).
+        # UNKNOWN if a driver long button has not yet been confirmed.
+        self.tja_pre_cruise_available = self._prev_cruise_available
+        self.tja_pre_cruise_enabled = self._prev_cruise_enabled
+        self.tja_pre_cruise_unknown = bool(self._unconfirmed_long_btn)
+        # Do not mark TJA itself as an unconfirmed longitudinal button.
+        # Route 00000019 event 53: TJA while ARMED stayed ARMED, so cruise
+        # never moved and the next TJA snapshot became UNKNOWN — no restore.
+        lkas_events = [
+          structs.CarState.ButtonEvent(type=ButtonType.lkas, pressed=True)
+          for _ in range(toggle_count)
+        ]
+        self._tja_lkas_latched = True
+      elif self._tja_lkas_latched and not self.tja_button:
+        lkas_events = [structs.CarState.ButtonEvent(type=ButtonType.lkas, pressed=False)]
+        self._tja_lkas_latched = False
 
     ret.buttonEvents = [
       *create_button_events(self.distance_button, prev_distance_button, {1: ButtonType.gapAdjustCruise}),
@@ -213,17 +287,54 @@ class CarState(CarStateBase, CarStateExt):
       *create_button_events(self.decel_button, prev_decel_button, {1: ButtonType.decelCruise}),
       *create_button_events(self.cancel_button, prev_cancel_button, {1: ButtonType.cancel}),
       *create_button_events(self.resume_button, prev_resume_button, {1: ButtonType.resumeCruise}),
-      *create_button_events(self.tja_button, prev_tja_button, {1: ButtonType.lkas}),
+      *lkas_events,
       *create_button_events(self.main_button, prev_main_button, {1: ButtonType.mainCruise}),
     ]
 
     CarStateExt.update(self, ret, ret_sp, can_parsers)
 
+    new_avail = bool(ret.cruiseState.available)
+    new_en = bool(ret.cruiseState.enabled)
+    if new_avail != self._prev_cruise_available or new_en != self._prev_cruise_enabled:
+      if long_rise_this_update:
+        # CRZ_CTRL/PEDALS is parsed before buttons. A same-cycle cruise change
+        # cannot prove this cycle's new MRCC/SET/RES/CANCEL; keep UNKNOWN.
+        self._unconfirmed_long_btn = True
+      else:
+        self._unconfirmed_long_btn = False
+    self._prev_cruise_available = new_avail
+    self._prev_cruise_enabled = new_en
+
     return ret, ret_sp
+
+  def reset_tja(self) -> None:
+    """Panda reconnect / safety reinit: no boot-held synthetic edge, latch starts OFF."""
+    if self._tja_edge is not None:
+      self._tja_edge.reset()
+      self._tja_lkas_latched = False
+      self.tja_toggles_this_update = 0
+      self._unconfirmed_long_btn = True
+      self.tja_pre_cruise_unknown = True
+      self.tja_edge_reset = True
+
+  def on_panda_alive(self, alive: bool) -> None:
+    if self._tja_edge is None:
+      return
+    if self._panda_alive and not alive:
+      self._panda_was_dead = True
+    if self._panda_was_dead and alive:
+      self.reset_tja()
+      self._panda_was_dead = False
+    self._panda_alive = bool(alive)
 
   @staticmethod
   def get_can_parsers(CP, CP_SP):
     pt_messages = []
+    tja = bool(CP.safetyConfigs and (CP.safetyConfigs[0].safetyParam & MazdaSafetyFlags.TJA))
+    if tja:
+      # Registered (not lazy): single-TJA reads every CRZ_BTNS frame via vl_all so
+      # userspace edge detection matches Panda's per-RX step.
+      pt_messages.append(("CRZ_BTNS", 10))
     if CP.openpilotLongitudinalControl:
       # no liveness check: the stock frame is expected to disappear after the radar
       # teardown, and its presence is what the two-master guard watches for
@@ -231,7 +342,10 @@ class CarState(CarStateBase, CarStateExt):
     cam_messages = [
       # read through vl_all, which unlike vl has no lazy registration
       ("CAM_LANEINFO", 0),
-      ("CAM_TRAFFIC_SIGNS", 0),
+      # Present on some Mazda cameras only. The 2020 CX-9 model-test route has
+      # zero 0x35f frames; a freq-0 liveness check makes canValid false for the
+      # entire route (5745 invalid iterations). Not used by TJA/MADS/MRCC.
+      ("CAM_TRAFFIC_SIGNS", float("nan")),
     ]
     return {
       Bus.pt: CANParser(DBC[CP.carFingerprint][Bus.pt], pt_messages, 0),

@@ -42,6 +42,7 @@ inline EdgeTransition m_get_edge_transition(const bool current, const bool last)
 }
 
 inline void m_mads_state_init(void) {
+  mads_button_press = MADS_BUTTON_UNAVAILABLE;
   m_mads_state.is_vehicle_moving = NULL;
   m_mads_state.acc_main.current = NULL;
   m_mads_state.mads_button.current = MADS_BUTTON_UNAVAILABLE;
@@ -98,7 +99,8 @@ inline void m_update_control_state(void) {
   bool allowed = true;
   const bool physical_button_rising = m_mads_state.mads_button.transition == MADS_EDGE_RISING;
 
-  // Initial control requests from button or ACC transitions
+  // Initial control requests from button or ACC transitions.
+  // Physical-button-only platforms (Mazda TJA): ACC main / OP engage must not own lateral.
   if (physical_button_rising ||
       (!mads_physical_button_only && ((m_mads_state.acc_main.transition == MADS_EDGE_RISING) ||
                                       (m_mads_state.op_controls_allowed.transition == MADS_EDGE_RISING)))) {

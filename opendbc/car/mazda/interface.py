@@ -18,6 +18,8 @@ class CarInterface(CarInterfaceBase):
     ret.brand = "mazda"
     ret.safetyConfigs = [get_safety_config(structs.CarParams.SafetyModel.mazda)]
 
+    # CX-5 2022-25: physical TJA owns MADS/lateral independently of MRCC.
+    # Compose with LONG below — do not overwrite.
     if candidate == CAR.MAZDA_CX5_2022:
       ret.safetyConfigs[0].safetyParam |= MazdaSafetyFlags.TJA.value
 

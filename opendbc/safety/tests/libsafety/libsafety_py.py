@@ -110,6 +110,8 @@ void init_tests(void);
 
 void set_honda_fwd_brake(bool c);
 bool get_honda_fwd_brake(void);
+void set_mazda_tja_edge_state(uint8_t s);
+void set_mazda_restore_debug(uint8_t target, bool released, uint8_t tx);
 void set_honda_alt_brake_msg(bool c);
 void set_honda_bosch_long(bool c);
 int get_honda_hw(void);

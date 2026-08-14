@@ -155,6 +155,7 @@ class Buttons:
   SET_MINUS = 2
   RESUME = 3
   CANCEL = 4
+  MAIN = 5  # CRZ_BTNS.MRCC_BUTTON; 2025 CX-5 master OFF/ON
 
 
 FW_QUERY_CONFIG = FwQueryConfig(

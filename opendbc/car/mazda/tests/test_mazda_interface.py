@@ -1,4 +1,5 @@
-import pytest
+import unittest
+from opendbc.car.mazda.tests.unittest_compat import approx
 
 from opendbc.car import structs
 from opendbc.car.common.conversions import Conversions as CV
@@ -26,8 +27,8 @@ def _params(candidate, car_fw=None, alpha_long=False):
                                  alpha_long, is_release=False, docs=False)
 
 
-class TestMazdaEpsSwap:
-  """A 2022+ CX-5 EPS swapped into an older Mazda brings the EPS-derived behaviour with it.
+class TestMazdaEpsSwap(unittest.TestCase):
+  """A 2022+ CX-5 EPS swapped into an older Mazda brings the EPS-derived behavior with it.
 
   Pre-2022 Mazdas are dashcam only because their EPS locks steering out after ~5 s hands-off
   and below 45 kph. That lockout lives in the EPS, so the swap lifts it. Everything keyed on
@@ -37,14 +38,14 @@ class TestMazdaEpsSwap:
   def test_stock_older_mazda_is_dashcam_only(self):
     CP = _params(CAR.MAZDA_CX5, _eps_fw(STOCK_CX5_EPS_FW))
     assert CP.dashcamOnly
-    assert CP.minSteerSpeed == pytest.approx(LKAS_LIMITS.DISABLE_SPEED * CV.KPH_TO_MS)
-    assert CP.steerActuatorDelay == pytest.approx(0.1)
+    assert CP.minSteerSpeed == approx(LKAS_LIMITS.DISABLE_SPEED * CV.KPH_TO_MS)
+    assert CP.steerActuatorDelay == approx(0.1)
 
   def test_swapped_eps_lifts_dashcam_and_the_speed_floor(self):
     CP = _params(CAR.MAZDA_CX5, _eps_fw(SWAPPED_EPS_FW))
     assert not CP.dashcamOnly
     assert CP.minSteerSpeed == 0
-    assert CP.steerActuatorDelay == pytest.approx(0.14)
+    assert CP.steerActuatorDelay == approx(0.14)
 
   def test_swapped_eps_does_not_unlock_longitudinal(self):
     # the radar and camera are not part of an EPS swap, and this car keeps its own pre-2022 pair
@@ -65,14 +66,16 @@ class TestMazdaEpsSwap:
     cx5_2022 = _params(CAR.MAZDA_CX5_2022)
     assert not cx5_2022.dashcamOnly
     assert cx5_2022.minSteerSpeed == 0
-    assert cx5_2022.steerActuatorDelay == pytest.approx(0.14)
+    assert cx5_2022.steerActuatorDelay == approx(0.14)
     assert cx5_2022.alphaLongitudinalAvailable
+    assert cx5_2022.safetyConfigs[0].safetyParam & MazdaSafetyFlags.TJA
+    assert not (cx5_2022.safetyConfigs[0].safetyParam & MazdaSafetyFlags.LONG)
 
     # the CX-9 2021 is supported without the CX-5 EPS, so it keeps the 45 kph floor
     cx9_2021 = _params(CAR.MAZDA_CX9_2021)
     assert not cx9_2021.dashcamOnly
-    assert cx9_2021.minSteerSpeed == pytest.approx(LKAS_LIMITS.DISABLE_SPEED * CV.KPH_TO_MS)
-    assert cx9_2021.steerActuatorDelay == pytest.approx(0.1)
+    assert cx9_2021.minSteerSpeed == approx(LKAS_LIMITS.DISABLE_SPEED * CV.KPH_TO_MS)
+    assert cx9_2021.steerActuatorDelay == approx(0.1)
 
   def test_docs_are_generated_without_firmware(self):
     # car_fw is empty when building CARS.md, so the docs must keep advertising dashcam mode
@@ -82,13 +85,45 @@ class TestMazdaEpsSwap:
       assert CP.dashcamOnly, candidate
 
 
-def test_tja_safety_flag_isolated_to_verified_platform():
-  for candidate in CAR:
-    CP = _params(candidate)
-    has_tja_flag = bool(CP.safetyConfigs[0].safetyParam & MazdaSafetyFlags.TJA)
-    assert has_tja_flag == (candidate == CAR.MAZDA_CX5_2022), candidate
+class TestMazdaTjaSafetyParam(unittest.TestCase):
+  def test_tja_only_is_bit_2(self):
+    CP = _params(CAR.MAZDA_CX5_2022, alpha_long=False)
+    assert CP.safetyConfigs[0].safetyParam == MazdaSafetyFlags.TJA
 
-  # TJA and longitudinal flags are independent and must coexist on the verified platform.
-  CP = _params(CAR.MAZDA_CX5_2022, alpha_long=True)
-  assert CP.safetyConfigs[0].safetyParam & MazdaSafetyFlags.TJA
-  assert CP.safetyConfigs[0].safetyParam & MazdaSafetyFlags.LONG
+  def test_tja_plus_alpha_long_composes(self):
+    CP = _params(CAR.MAZDA_CX5_2022, alpha_long=True)
+    assert CP.safetyConfigs[0].safetyParam == (MazdaSafetyFlags.TJA | MazdaSafetyFlags.LONG)
+    assert CP.openpilotLongitudinalControl
+
+  def test_non_tja_mazda_has_no_tja_flag(self):
+    for candidate in (CAR.MAZDA_CX5, CAR.MAZDA_CX9, CAR.MAZDA_CX9_2021, CAR.MAZDA_3, CAR.MAZDA_6):
+      CP = _params(candidate, alpha_long=True)
+      assert not (CP.safetyConfigs[0].safetyParam & MazdaSafetyFlags.TJA), candidate
+      assert not (CP.safetyConfigs[0].safetyParam & MazdaSafetyFlags.LONG), candidate
+
+
+class TestMazdaParserGating(unittest.TestCase):
+  def test_tja_required_crz_btns_only_on_tja_platforms(self):
+    from opendbc.car import Bus
+    from opendbc.car.mazda.carstate import CarState
+    for candidate in CAR:
+      CP = _params(candidate)
+      parsers = CarState.get_can_parsers(CP, None)
+      pt_names = {st.name for st in parsers[Bus.pt].message_states.values()}
+      tja = bool(CP.safetyConfigs and (CP.safetyConfigs[0].safetyParam & MazdaSafetyFlags.TJA))
+      if tja:
+        assert "CRZ_BTNS" in pt_names, candidate
+      else:
+        assert "CRZ_BTNS" not in pt_names, candidate
+      cam_names = {st.name for st in parsers[Bus.cam].message_states.values()}
+      assert "CAM_LANEINFO" in cam_names, candidate
+
+  def test_cam_traffic_signs_is_not_a_liveness_check(self):
+    from opendbc.car import Bus
+    from opendbc.car.mazda.carstate import CarState
+    for candidate in CAR:
+      CP = _params(candidate)
+      parsers = CarState.get_can_parsers(CP, None)
+      cam = {st.name: st for st in parsers[Bus.cam].message_states.values()}
+      assert cam["CAM_LANEINFO"].ignore_alive is False, candidate
+      assert cam["CAM_TRAFFIC_SIGNS"].ignore_alive is True, candidate

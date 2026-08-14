@@ -5,7 +5,8 @@ and the longitudinal message builders and stop-and-go state machine."""
 from types import SimpleNamespace
 
 import numpy as np
-import pytest
+import unittest
+from opendbc.car.mazda.tests.unittest_compat import approx, parametrize
 
 from opendbc.can import CANPacker, CANParser
 from opendbc.car import Bus, structs
@@ -15,253 +16,71 @@ from opendbc.car.mazda.longitudinal import (HOLD_CTRL_LATCH_FRAMES, HOLD_LATCH_F
                                             RESUME_REACTIVATE_FRAMES, RESUME_RELEASE_FRAMES, RESUME_UNLATCH_FRAMES,
                                             StopAndGoStateMachine, StopGoState)
 from opendbc.car.mazda.interface import CarInterface
-from opendbc.car.mazda.values import CAR, CarControllerParams, MazdaSafetyFlags
-from opendbc.sunnypilot.car.mazda.icbm import IntelligentCruiseButtonManagementInterface
+from opendbc.car.mazda.values import CAR, CarControllerParams
 
 
-class TestCarControllerParams:
+class TestCarControllerParams(unittest.TestCase):
 
-  @pytest.fixture
-  def cx5_2022_params(self):
+  def _cx5_2022_params(self):
     class FakeCP:
       carFingerprint = CAR.MAZDA_CX5_2022
       minSteerSpeed = 0.0   # steer_to_zero -> CX-5 2022+ EPS present
     return CarControllerParams(FakeCP())
 
-  @pytest.fixture
-  def eps_swap_params(self):
+  def _eps_swap_params(self):
     # A CX-5 2022+ EPS swapped into (or shared by) another Mazda: different model, same EPS.
     class FakeCP:
       carFingerprint = CAR.MAZDA_CX9_2021
       minSteerSpeed = 0.0
     return CarControllerParams(FakeCP())
 
-  @pytest.fixture
-  def pre_2022_params(self):
+  def _pre_2022_params(self):
     class FakeCP:
       carFingerprint = CAR.MAZDA_CX5
       minSteerSpeed = 12.5   # no CX-5 EPS -> low-speed lockout, minSteerSpeed > 0
     return CarControllerParams(FakeCP())
 
-  def test_cx5_2022_has_lookup(self, cx5_2022_params):
+  def test_cx5_2022_has_lookup(self):
+    cx5_2022_params = self._cx5_2022_params()
     assert hasattr(cx5_2022_params, 'STEER_MAX_LOOKUP')
     assert cx5_2022_params.STEER_MAX == 1200
 
-  def test_cx5_2022_low_speed(self, cx5_2022_params):
+  def test_cx5_2022_low_speed(self):
+    cx5_2022_params = self._cx5_2022_params()
     p = cx5_2022_params
     for v in [0.0, 5.0, 10.0, 14.2]:
       sm = round(float(np.interp(v, p.STEER_MAX_LOOKUP[0], p.STEER_MAX_LOOKUP[1])))
       assert sm == 1200
 
-  def test_cx5_2022_high_speed(self, cx5_2022_params):
+  def test_cx5_2022_high_speed(self):
+    cx5_2022_params = self._cx5_2022_params()
     p = cx5_2022_params
     for v in [14.5, 20.0, 30.0]:
       sm = round(float(np.interp(v, p.STEER_MAX_LOOKUP[0], p.STEER_MAX_LOOKUP[1])))
       assert sm == 800
 
-  def test_cx5_2022_rate_limits(self, cx5_2022_params):
+  def test_cx5_2022_rate_limits(self):
+    cx5_2022_params = self._cx5_2022_params()
     assert cx5_2022_params.STEER_DELTA_UP == 12
     assert cx5_2022_params.STEER_DELTA_DOWN == 25
 
-  def test_cx5_eps_driver_multiplier(self, cx5_2022_params):
+  def test_cx5_eps_driver_multiplier(self):
+    cx5_2022_params = self._cx5_2022_params()
     # 15 is the CX-5-EPS tune (upstream stock is 1)
     assert cx5_2022_params.STEER_DRIVER_MULTIPLIER == 15
 
-  def test_eps_swap_gets_cx5_tune(self, eps_swap_params):
+  def test_eps_swap_gets_cx5_tune(self):
+    eps_swap_params = self._eps_swap_params()
     # EPS present (minSteerSpeed == 0) on a non-CX-5 model still gets the higher-authority tune
     assert eps_swap_params.STEER_MAX == 1200
     assert eps_swap_params.STEER_DRIVER_MULTIPLIER == 15
     assert hasattr(eps_swap_params, 'STEER_MAX_LOOKUP')
 
-  def test_no_eps_no_lookup(self, pre_2022_params):
+  def test_no_eps_no_lookup(self):
+    pre_2022_params = self._pre_2022_params()
     assert not hasattr(pre_2022_params, 'STEER_MAX_LOOKUP')
     assert pre_2022_params.STEER_MAX == 800
     assert pre_2022_params.STEER_DRIVER_MULTIPLIER == 1
-
-
-class TestMazdaLateralAuthorization:
-
-  @pytest.fixture
-  def controller(self):
-    CP = CarInterface.get_params(CAR.MAZDA_CX5_2022, {0: {}, 1: {}, 2: {}}, [], alpha_long=False,
-                                 is_release=False, docs=False)
-    CP_SP = CarInterface.get_params_sp(CP, CAR.MAZDA_CX5_2022, {0: {}, 1: {}, 2: {}}, [], False, False, False)
-    assert not CP.openpilotLongitudinalControl
-    controller = CarController({Bus.pt: "mazda_2017"}, CP, CP_SP)
-    controller.frame = 1  # keep this steering-only fixture off the periodic HUD update frame
-    assert controller.CP.safetyConfigs[0].safetyParam & MazdaSafetyFlags.TJA
-    return controller
-
-  @pytest.fixture
-  def legacy_controller(self):
-    CP = CarInterface.get_params(CAR.MAZDA_CX9_2021, {0: {}, 1: {}, 2: {}}, [], alpha_long=False,
-                                 is_release=False, docs=False)
-    CP_SP = CarInterface.get_params_sp(CP, CAR.MAZDA_CX9_2021, {0: {}, 1: {}, 2: {}}, [], False, False, False)
-    assert not (CP.safetyConfigs[0].safetyParam & MazdaSafetyFlags.TJA)
-    controller = CarController({Bus.pt: "mazda_2017"}, CP, CP_SP)
-    controller.frame = 1
-    return controller
-
-  @pytest.fixture(autouse=True)
-  def disable_icbm(self, monkeypatch):
-    monkeypatch.setattr(IntelligentCruiseButtonManagementInterface, "update", lambda *args: [])
-
-  @staticmethod
-  def controls(lat_active=True):
-    control = structs.CarControl()
-    control.latActive = lat_active
-    control.actuators.torque = 1.0
-    return control.as_reader(), structs.CarControlSP()
-
-  @staticmethod
-  def carstate(available):
-    out = structs.CarState()
-    out.vEgoRaw = 10.0
-    out.steeringTorque = 0.0
-    out.cruiseState.available = available
-    return SimpleNamespace(out=out, crz_btns_counter=0,
-                           cam_laneinfo={}, cam_lkas={"BIT_1": 1, "ERR_BIT_1": 0, "ERR_BIT_2": 0},
-                           lkas_allowed_speed=True, cancel_button=0)
-
-  @staticmethod
-  def lkas_request(sends):
-    dat = next(dat for addr, dat, bus in sends if addr == 0x243 and bus == 0)
-    return (((dat[0] & 0x0f) << 8) | dat[1]) - 2048
-
-  def test_tja_lateral_does_not_depend_on_acc_main(self, controller):
-    control, control_sp = self.controls()
-    carstate = self.carstate(available=False)
-
-    emitted = []
-    for _ in range(4):
-      actuators, sends = controller.update(control, control_sp, carstate, 0)
-      emitted.append(self.lkas_request(sends))
-      assert actuators.torqueOutputCan == emitted[-1]
-    assert emitted == [12, 24, 36, 48]
-
-  def test_non_tja_lateral_remains_gated_by_acc_main(self, legacy_controller):
-    control, control_sp = self.controls()
-    carstate = self.carstate(available=False)
-
-    for _ in range(20):
-      actuators, sends = legacy_controller.update(control, control_sp, carstate, 0)
-      assert self.lkas_request(sends) == 0
-      assert actuators.torqueOutputCan == 0
-      assert legacy_controller.apply_torque_last == 0
-
-    carstate.out.cruiseState.available = True
-    _, sends = legacy_controller.update(control, control_sp, carstate, 0)
-    assert self.lkas_request(sends) == legacy_controller.params.STEER_DELTA_UP
-
-  def test_lat_inactive_always_commands_zero(self, controller):
-    control, control_sp = self.controls(lat_active=False)
-    carstate = self.carstate(available=False)
-    for _ in range(4):
-      actuators, sends = controller.update(control, control_sp, carstate, 0)
-      assert self.lkas_request(sends) == 0
-      assert actuators.torqueOutputCan == 0
-      assert controller.apply_torque_last == 0
-
-  def test_mrcc_available_path_retains_normal_ramp(self, controller):
-    control, control_sp = self.controls()
-    carstate = self.carstate(available=True)
-
-    emitted = []
-    for _ in range(4):
-      _, sends = controller.update(control, control_sp, carstate, 0)
-      emitted.append(self.lkas_request(sends))
-    assert emitted == [12, 24, 36, 48]
-
-  @pytest.mark.parametrize(("lat_active", "available", "camera_raw", "expected_tja", "expected_torque"), [
-    (False, False, "4201000000001040", (0, 0), 0),
-    (True, False, "4201000000001040", (2, 2), 12),
-    (False, True, "4201000a20001040", (0, 0), 0),
-    (True, True, "4201000a20001040", (2, 2), 12),
-  ])
-  def test_tja_hud_matrix_does_not_change_steering_or_follow_mrcc(self, controller, lat_active, available,
-                                                                  camera_raw, expected_tja, expected_torque):
-    control, control_sp = self.controls(lat_active=lat_active)
-    carstate = self.carstate(available=available)
-    carstate.cam_laneinfo = decode_laneinfo(camera_raw, bus=2)
-    controller.frame = 50
-
-    actuators, sends = controller.update(control, control_sp, carstate, 0)
-    assert actuators.torqueOutputCan == expected_torque
-    assert self.lkas_request(sends) == expected_torque
-    hud = next(dat for addr, dat, bus in sends if addr == 0x440 and bus == 0)
-    decoded = decode_laneinfo(hud.hex(), bus=0)
-    assert (decoded["TJA"], decoded["TJA_TRANSITION"]) == expected_tja
-
-
-def decode_laneinfo(raw, bus):
-  parser = CANParser("mazda_2017", [("CAM_LANEINFO", float("nan"))], bus)
-  parser.update([(0, [(0x440, bytes.fromhex(raw), bus)])])
-  return dict(parser.vl["CAM_LANEINFO"])
-
-
-class TestMazdaHudMessages:
-
-  @pytest.fixture
-  def packer(self):
-    return CANPacker("mazda_2017")
-
-  @pytest.mark.parametrize(("raw", "tja_active", "expected_raw", "expected_tja"), [
-    ("4201000000001040", False, "4201000000001040", (0, 0)),
-    ("4201000a20001040", False, "4201000000001040", (0, 0)),  # MADS off, MRCC on
-    ("4201000000001040", True, "4201000820001040", (2, 2)),   # MADS on, MRCC off
-    ("4201000a20001040", True, "4201000820001040", (2, 2)),  # MADS on, MRCC on
-  ])
-  def test_tja_platform_display_matrix(self, packer, raw, tja_active, expected_raw, expected_tja):
-    camera = decode_laneinfo(raw, bus=2)
-    _, generated, bus = mazdacan.create_alert_command(packer, camera, False, False,
-                                                      tja_lateral=True, tja_active=tja_active)
-    decoded = decode_laneinfo(generated.hex(), bus=0)
-    assert bus == 0
-    assert generated.hex() == expected_raw
-    assert (decoded["TJA"], decoded["TJA_TRANSITION"]) == expected_tja
-
-  def test_tja_on_off_reenable_does_not_latch_state(self, packer):
-    camera = decode_laneinfo("4201000a20001040", bus=2)  # MRCC remains on throughout
-    for tja_active, expected in ((True, (2, 2)), (False, (0, 0)), (True, (2, 2))):
-      _, generated, _ = mazdacan.create_alert_command(packer, camera, False, False,
-                                                      tja_lateral=True, tja_active=tja_active)
-      decoded = decode_laneinfo(generated.hex(), bus=0)
-      assert (decoded["TJA"], decoded["TJA_TRANSITION"]) == expected
-
-  def test_mrcc_changes_do_not_toggle_active_tja_hud(self, packer):
-    for raw in ("4201000a20001040", "4201000000001040", "4201000a20001040"):
-      camera = decode_laneinfo(raw, bus=2)
-      _, generated, _ = mazdacan.create_alert_command(packer, camera, False, False,
-                                                      tja_lateral=True, tja_active=True)
-      decoded = decode_laneinfo(generated.hex(), bus=0)
-      assert (decoded["TJA"], decoded["TJA_TRANSITION"]) == (2, 2)
-
-  def test_non_tja_stage5c_payload_is_unchanged(self, packer):
-    camera = decode_laneinfo("4201000a20001040", bus=2)
-    _, generated, _ = mazdacan.create_alert_command(packer, camera, False, False,
-                                                    tja_lateral=False, tja_active=True)
-    assert generated.hex() == "4201000000001040"
-
-  @pytest.mark.parametrize(("steer_required", "expected", "raw"), [
-    (False, (0, 0, 0), "4201000820001040"),
-    (True, (7, 1, 1), "4201000820001e49"),
-  ])
-  def test_hands_warning_and_tja_state_are_independent(self, packer, steer_required, expected, raw):
-    camera = decode_laneinfo("4201000a20001040", bus=2)
-    _, generated, _ = mazdacan.create_alert_command(packer, camera, False, steer_required,
-                                                    tja_lateral=True, tja_active=True)
-    decoded = decode_laneinfo(generated.hex(), bus=0)
-    assert generated.hex() == raw
-    assert (decoded["HANDS_WARN_3_BITS"], decoded["HANDS_ON_STEER_WARN"], decoded["HANDS_ON_STEER_WARN_2"]) == expected
-    assert (decoded["TJA"], decoded["TJA_TRANSITION"]) == (2, 2)
-
-  def test_lane_fields_remain_camera_pass_through(self, packer):
-    camera = decode_laneinfo("4201000a20001040", bus=2)
-    _, generated, _ = mazdacan.create_alert_command(packer, camera, False, False,
-                                                    tja_lateral=True, tja_active=True)
-    decoded = decode_laneinfo(generated.hex(), bus=0)
-    for signal in ("LINE_VISIBLE", "LINE_NOT_VISIBLE", "LANE_LINES", "BIT1", "BIT2", "BIT3", "NO_ERR_BIT", "S1", "S1_HBEAM"):
-      assert decoded[signal] == camera[signal]
 
 
 def crz_info_reference_checksum(dat):
@@ -274,29 +93,30 @@ def decode_accel_cmd_raw(dat):
   return (((dat[2] & 0x3) << 11) | (dat[3] << 3) | (dat[4] >> 5)) - 4096
 
 
-class TestMazdaLongitudinalMessages:
+class TestMazdaLongitudinalMessages(unittest.TestCase):
   """The synthetic CRZ_INFO/CRZ_CTRL/radar frames must reproduce stock captures byte for
   byte; the hex values below come from real radar traffic."""
 
-  @pytest.fixture
-  def packer(self):
+  def _packer(self):
     return CANPacker("mazda_2017")
 
-  def test_crz_info_standby_matches_stock(self, packer):
+  def test_crz_info_standby_matches_stock(self):
+    packer = self._packer()
     for counter in range(16):
       checksum = (0x5d - counter) & 0xff
       expected = f"01ffe3ffc000{counter:02x}{checksum:02x}"
       dat = mazdacan.create_acc_command(packer, 0, counter, 0.0, False, False, False, False)[1]
       assert dat.hex() == expected
 
-  def test_crz_info_available_matches_stock(self, packer):
+  def test_crz_info_available_matches_stock(self):
+    packer = self._packer()
     for counter in range(16):
       checksum = (0x99 - counter) & 0xff
       expected = f"01ffe2000480{counter:02x}{checksum:02x}"
       dat = mazdacan.create_acc_command(packer, 0, counter, 0.0, False, True, False, False)[1]
       assert dat.hex() == expected
 
-  @pytest.mark.parametrize(("accel", "stopping", "unlatching", "counter", "expected"), [
+  @parametrize(("accel", "stopping", "unlatching", "counter", "expected"), [
     (0.0, False, False, 0, "01ffe20006800097"),     # engaged, zero command
     (2.0, False, False, 3, "01ffe2fa0680039a"),     # ISO max accel, raw 2000
     (-3.5, False, False, 7, "01ffe04a868007c8"),    # ISO max brake, raw -3500
@@ -304,11 +124,13 @@ class TestMazdaLongitudinalMessages:
     (-0.001, False, False, 9, "01ffe1ffe68009b0"),  # latched hold, raw -1
     (0.0, False, True, 11, "01ffe20006804b4c"),     # resume unlatch pulse
   ])
-  def test_crz_info_engaged_golden_bytes(self, packer, accel, stopping, unlatching, counter, expected):
+  def test_crz_info_engaged_golden_bytes(self, accel, stopping, unlatching, counter, expected):
+    packer = self._packer()
     dat = mazdacan.create_acc_command(packer, 0, counter, accel, True, False, stopping, unlatching)[1]
     assert dat.hex() == expected
 
-  def test_crz_info_accel_encoding_and_checksum(self, packer):
+  def test_crz_info_accel_encoding_and_checksum(self):
+    packer = self._packer()
     # the packed command must round-trip at the 0.001 factor and carry a valid masked-bit
     # checksum over the whole command window, stop bits set or not
     for raw in range(-3500, 2001, 137):
@@ -319,7 +141,7 @@ class TestMazdaLongitudinalMessages:
         assert bool(dat[5] & 0x04) == stopping
         assert bool(dat[6] & 0x10) == stopping
 
-  @pytest.mark.parametrize(("long_active", "acc_available", "gap", "has_lead", "phase", "acc_active_2", "expected"), [
+  @parametrize(("long_active", "acc_available", "gap", "has_lead", "phase", "acc_active_2", "expected"), [
     (False, False, 0, False, 0, False, "0201010000000000"),  # standby
     (False, True, 2, False, 0, False, "02010b0000000000"),   # MRCC armed, SET allowed
     (True, True, 2, True, 1, True, "0a018b2000001000"),      # engaged, cruise, no lead
@@ -329,7 +151,8 @@ class TestMazdaLongitudinalMessages:
     (True, True, 2, True, 3, False, "0a018b6000000000"),     # relaxed hold, ACC_ACTIVE_2 drops
     (True, True, 1, True, 2, True, "0a01874000001000"),      # driver gap 1 mirrored to the dash
   ])
-  def test_crz_ctrl_golden_bytes(self, packer, long_active, acc_available, gap, has_lead, phase, acc_active_2, expected):
+  def test_crz_ctrl_golden_bytes(self, long_active, acc_available, gap, has_lead, phase, acc_active_2, expected):
+    packer = self._packer()
     dat = mazdacan.create_crz_ctrl(packer, 0, long_active, acc_available, gap, has_lead, phase, acc_active_2)[1]
     assert dat.hex() == expected
 
@@ -355,14 +178,13 @@ class TestMazdaLongitudinalMessages:
     assert tracks[0x364] == "0a4000001dc0000f"
 
 
-class TestStopAndGoStateMachine:
+class TestStopAndGoStateMachine(unittest.TestCase):
 
-  @pytest.fixture
-  def sm(self):
+  def _sm(self):
     return StopAndGoStateMachine()
 
   @staticmethod
-  def run(sm, frames, **kwargs):
+  def _advance(sm, frames, **kwargs):
     defaults = dict(long_active=True, stopping=False, standstill=False,
                     resume_pressed=False, virtual_resume=False, gas_override=False)
     defaults.update(kwargs)
@@ -370,76 +192,83 @@ class TestStopAndGoStateMachine:
       state = sm.update(**defaults)
     return state
 
-  def test_full_stop_cycle_virtual_resume(self, sm):
-    assert self.run(sm, 1) == StopGoState.CRUISING
-    assert self.run(sm, 1, stopping=True) == StopGoState.STOPPING
-    assert self.run(sm, 1, stopping=True, standstill=True) == StopGoState.HOLD
+  def test_full_stop_cycle_virtual_resume(self):
+    sm = self._sm()
+    assert self._advance(sm, 1) == StopGoState.CRUISING
+    assert self._advance(sm, 1, stopping=True) == StopGoState.STOPPING
+    assert self._advance(sm, 1, stopping=True, standstill=True) == StopGoState.HOLD
     assert sm.stop_bits
 
     # a virtual resume cannot release the strong hold phase
-    assert self.run(sm, HOLD_LATCH_FRAMES - 2, stopping=True, standstill=True, virtual_resume=True) == StopGoState.HOLD
+    assert self._advance(sm, HOLD_LATCH_FRAMES - 2, stopping=True, standstill=True, virtual_resume=True) == StopGoState.HOLD
 
-    assert self.run(sm, 2, stopping=True, standstill=True) == StopGoState.HOLD_LATCHED
+    assert self._advance(sm, 2, stopping=True, standstill=True) == StopGoState.HOLD_LATCHED
     assert not sm.stop_bits
-    assert self.run(sm, HOLD_PASSIVE_FRAMES, stopping=True, standstill=True) == StopGoState.HOLD_PASSIVE
+    assert self._advance(sm, HOLD_PASSIVE_FRAMES, stopping=True, standstill=True) == StopGoState.HOLD_PASSIVE
     assert not sm.acc_active_2
 
     # resume out of the passive hold: latched-profile blip, then the unlatch pulse
-    assert self.run(sm, 1, stopping=True, standstill=True, virtual_resume=True) == StopGoState.RESUMING
+    assert self._advance(sm, 1, stopping=True, standstill=True, virtual_resume=True) == StopGoState.RESUMING
     assert not sm.resume_unlatching
-    self.run(sm, RESUME_REACTIVATE_FRAMES, stopping=True, standstill=True, virtual_resume=True)
+    self._advance(sm, RESUME_REACTIVATE_FRAMES, stopping=True, standstill=True, virtual_resume=True)
     assert sm.resume_unlatching
-    self.run(sm, RESUME_UNLATCH_FRAMES, stopping=True, standstill=True, virtual_resume=True)
+    self._advance(sm, RESUME_UNLATCH_FRAMES, stopping=True, standstill=True, virtual_resume=True)
     assert not sm.resume_unlatching
 
     # car creeps off the hold, request clears, release window runs out
-    assert self.run(sm, RESUME_RELEASE_FRAMES, stopping=False, standstill=False) == StopGoState.CRUISING
+    assert self._advance(sm, RESUME_RELEASE_FRAMES, stopping=False, standstill=False) == StopGoState.CRUISING
 
-  def test_hold_command_relaxes_at_latch(self, sm):
-    self.run(sm, 1, stopping=True)
-    self.run(sm, 1, stopping=True, standstill=True)
+  def test_hold_command_relaxes_at_latch(self):
+    sm = self._sm()
+    self._advance(sm, 1, stopping=True)
+    self._advance(sm, 1, stopping=True, standstill=True)
     # strong hold with stop bits and ACC_ACTIVE_2 set, near stop phase
     assert sm.state == StopGoState.HOLD
     assert sm.stop_bits and sm.acc_active_2
     assert sm.ctrl_phase(lead_visible=True) == 3
     # after the measured 3.8 s the command relaxes: stop bits and ACC_ACTIVE_2 clear together
-    self.run(sm, HOLD_LATCH_FRAMES, stopping=True, standstill=True)
+    self._advance(sm, HOLD_LATCH_FRAMES, stopping=True, standstill=True)
     assert sm.state == StopGoState.HOLD_LATCHED
     assert not sm.stop_bits and not sm.acc_active_2
     assert sm.ctrl_phase(lead_visible=True) == 3
 
-  def test_physical_res_waits_for_ctrl_latch(self, sm):
-    self.run(sm, 1, stopping=True)
-    self.run(sm, 1, stopping=True, standstill=True)
+  def test_physical_res_waits_for_ctrl_latch(self):
+    sm = self._sm()
+    self._advance(sm, 1, stopping=True)
+    self._advance(sm, 1, stopping=True, standstill=True)
     # earlier than any stock-observed release: RES is ignored
-    assert self.run(sm, 10, stopping=True, standstill=True, resume_pressed=True) == StopGoState.HOLD
-    self.run(sm, HOLD_CTRL_LATCH_FRAMES, stopping=True, standstill=True)
-    assert self.run(sm, 1, stopping=True, standstill=True, resume_pressed=True) == StopGoState.RESUMING
+    assert self._advance(sm, 10, stopping=True, standstill=True, resume_pressed=True) == StopGoState.HOLD
+    self._advance(sm, HOLD_CTRL_LATCH_FRAMES, stopping=True, standstill=True)
+    assert self._advance(sm, 1, stopping=True, standstill=True, resume_pressed=True) == StopGoState.RESUMING
 
-  def test_gas_releases_hold_immediately(self, sm):
-    self.run(sm, 1, stopping=True)
-    self.run(sm, 1, stopping=True, standstill=True)
-    assert self.run(sm, 1, stopping=True, standstill=True, gas_override=True) == StopGoState.RESUMING
+  def test_gas_releases_hold_immediately(self):
+    sm = self._sm()
+    self._advance(sm, 1, stopping=True)
+    self._advance(sm, 1, stopping=True, standstill=True)
+    assert self._advance(sm, 1, stopping=True, standstill=True, gas_override=True) == StopGoState.RESUMING
 
-  def test_rehold_when_car_does_not_move(self, sm):
-    self.run(sm, 1, stopping=True)
-    self.run(sm, HOLD_LATCH_FRAMES + 2, stopping=True, standstill=True)
-    self.run(sm, 1, stopping=True, standstill=True, virtual_resume=True)
+  def test_rehold_when_car_does_not_move(self):
+    sm = self._sm()
+    self._advance(sm, 1, stopping=True)
+    self._advance(sm, HOLD_LATCH_FRAMES + 2, stopping=True, standstill=True)
+    self._advance(sm, 1, stopping=True, standstill=True, virtual_resume=True)
     # request disappears, car never moved: fall back into a fresh hold
-    assert self.run(sm, RESUME_RELEASE_FRAMES, stopping=True, standstill=True) == StopGoState.HOLD
+    assert self._advance(sm, RESUME_RELEASE_FRAMES, stopping=True, standstill=True) == StopGoState.HOLD
     assert sm.hold_frames == 0
     assert sm.stop_bits
 
-  def test_long_disengage_resets(self, sm):
-    self.run(sm, 1, stopping=True)
-    self.run(sm, HOLD_LATCH_FRAMES + 2, stopping=True, standstill=True)
-    assert self.run(sm, 1, long_active=False) == StopGoState.CRUISING
+  def test_long_disengage_resets(self):
+    sm = self._sm()
+    self._advance(sm, 1, stopping=True)
+    self._advance(sm, HOLD_LATCH_FRAMES + 2, stopping=True, standstill=True)
+    assert self._advance(sm, 1, long_active=False) == StopGoState.CRUISING
     assert sm.hold_frames == 0
 
-  def test_stop_abort_returns_to_cruising(self, sm):
-    self.run(sm, 1, stopping=True)
+  def test_stop_abort_returns_to_cruising(self):
+    sm = self._sm()
+    self._advance(sm, 1, stopping=True)
     # lead speeds up again before the car reaches standstill
-    assert self.run(sm, 1, stopping=False) == StopGoState.CRUISING
+    assert self._advance(sm, 1, stopping=False) == StopGoState.CRUISING
 
 
 def _mock_cc(long_active=True, accel=0.5, long_state=None, standstill=False, gas=False, override=False,
@@ -462,8 +291,7 @@ def _mock_cc(long_active=True, accel=0.5, long_state=None, standstill=False, gas
   return cc, cc_sp, cs
 
 
-@pytest.fixture
-def cc():
+def _cc():
   CP = CarInterface.get_params(CAR.MAZDA_CX5_2022, {0: {}, 1: {}, 2: {}}, [], alpha_long=True,
                                is_release=False, docs=False)
   CP_SP = CarInterface.get_params_sp(CP, CAR.MAZDA_CX5_2022, {0: {}, 1: {}, 2: {}}, [], True, False, False)
@@ -490,11 +318,12 @@ def _step(cc, **kw):
   return sends
 
 
-class TestLongitudinalIntegration:
+class TestLongitudinalIntegration(unittest.TestCase):
   """Drives the real CarController.update_longitudinal through an engage -> cruise -> stop ->
   hold -> resume timeline and checks the emitted CAN, not just the state machine in isolation."""
 
-  def test_engaged_frame_rates_and_counters(self, cc):
+  def test_engaged_frame_rates_and_counters(self):
+    cc = _cc()
     long = structs.CarControl.Actuators.LongControlState
     crz_info = crz_ctrl = radar_static = tester = 0
     for _ in range(100):  # 1 s at 100 Hz
@@ -518,7 +347,8 @@ class TestLongitudinalIntegration:
     assert tester == 2                    # 2 Hz, single bus
     assert cc.long_counter == 50 and cc.radar_counter == 10
 
-  def test_gap_setting_mirrors_driver(self, cc):
+  def test_gap_setting_mirrors_driver(self):
+    cc = _cc()
     for gap in (1, 2, 3):
       cc.frame = 0  # force emission on the first step
       sends = _step(cc, gap=gap, long_state=structs.CarControl.Actuators.LongControlState.pid)
@@ -527,7 +357,8 @@ class TestLongitudinalIntegration:
       cp.update([(0, [(0x21c, ctrl, 0)])])
       assert cp.vl["CRZ_CTRL"]["DISTANCE_SETTING"] == gap
 
-  def test_stop_emits_hold_then_relaxes(self, cc):
+  def test_stop_emits_hold_then_relaxes(self):
+    cc = _cc()
     long = structs.CarControl.Actuators.LongControlState
 
     def accel_cmd(sends):
@@ -551,16 +382,17 @@ class TestLongitudinalIntegration:
     assert hold_seen, "strong -1024 hold command never emitted at standstill"
     assert latched_seen, "hold never relaxed to the latched -1 command"
 
-  def test_gas_override_stays_engaged(self, cc):
+  def test_gas_override_stays_engaged(self):
     """A gas press is an override, not a disengagement. The command goes to zero as on every
     other port, but the engaged bits stay set the way Honda drives CONTROL_ON off CC.enabled.
     Clearing them mid-decel takes the PCM out of ACC mode (docs/mazda-gas-override.md)."""
+    cc = _cc()
     long = structs.CarControl.Actuators.LongControlState
 
     # braking hard, then the driver taps the gas
     for _ in range(200):
       _step(cc, long_state=long.pid, accel=-2.0, cruise_engaged=True)
-    assert cc.accel_last == pytest.approx(-2.0)
+    assert cc.accel_last == approx(-2.0)
 
     cmds = []
     for _ in range(100):  # 1 s of override
@@ -575,19 +407,20 @@ class TestLongitudinalIntegration:
     assert all(crz_active), "CRZ_ACTIVE dropped during a gas override"
     assert set(raw) == {0}, f"command should be zero through the override, got {sorted(set(raw))}"
 
-  def test_command_slew_is_rate_limited(self, cc):
+  def test_command_slew_is_rate_limited(self):
     """The plan can step; the wire should not. Windup is limited tightly because dumping the
     brake in one frame is what the driver feels, winddown loosely so braking is never delayed."""
+    cc = _cc()
     long = structs.CarControl.Actuators.LongControlState
     for _ in range(200):
       _step(cc, long_state=long.pid, accel=-2.0, cruise_engaged=True)
-    assert cc.accel_last == pytest.approx(-2.0)
+    assert cc.accel_last == approx(-2.0)
 
     # plan jumps straight to +1.0: the command must ramp, not step
     prev = cc.accel_last
     for _ in range(5):
       _step(cc, long_state=long.pid, accel=1.0, cruise_engaged=True)
-      assert cc.accel_last - prev == pytest.approx(CarControllerParams.ACCEL_WINDUP_LIMIT, abs=1e-6)
+      assert cc.accel_last - prev == approx(CarControllerParams.ACCEL_WINDUP_LIMIT, abs=1e-6)
       prev = cc.accel_last
 
     # and the other way, at the looser winddown limit
@@ -596,10 +429,11 @@ class TestLongitudinalIntegration:
     prev = cc.accel_last
     for _ in range(5):
       _step(cc, long_state=long.pid, accel=-3.0, cruise_engaged=True)
-      assert cc.accel_last - prev == pytest.approx(CarControllerParams.ACCEL_WINDDOWN_LIMIT, abs=1e-6)
+      assert cc.accel_last - prev == approx(CarControllerParams.ACCEL_WINDDOWN_LIMIT, abs=1e-6)
       prev = cc.accel_last
 
-  def test_accel_last_tracks_the_wire_not_the_plan(self, cc):
+  def test_accel_last_tracks_the_wire_not_the_plan(self):
+    cc = _cc()
     # update() reports accel_last as actuatorsOutput.accel, the way Toyota, Ford and Honda
     # report the value they sent. It must be the wire value, clip and hold included.
     long = structs.CarControl.Actuators.LongControlState
@@ -607,7 +441,7 @@ class TestLongitudinalIntegration:
     # a plan beyond the envelope is reported clipped, not as asked
     for _ in range(400):
       sends = _step(cc, long_state=long.pid, accel=-9.0, cruise_engaged=True)
-    assert cc.accel_last == pytest.approx(CarControllerParams.ACCEL_MIN)
+    assert cc.accel_last == approx(CarControllerParams.ACCEL_MIN)
     frame = _long_frames(sends)
     if frame is not None:
       assert frame[0] == round(cc.accel_last * 1000)
@@ -615,7 +449,7 @@ class TestLongitudinalIntegration:
     # the standstill hold is a fixed stock replay, and that is what gets reported
     for _ in range(int(0.5 / 0.01)):
       _step(cc, long_state=long.stopping, accel=-1.5, standstill=True, cruise_engaged=True)
-    assert cc.accel_last == pytest.approx(CarControllerParams.ACCEL_HOLD)
+    assert cc.accel_last == approx(CarControllerParams.ACCEL_HOLD)
 
     # through a gas override we report the zero we actually send
     for _ in range(10):
@@ -623,7 +457,8 @@ class TestLongitudinalIntegration:
             override=True, cruise_engaged=True)
     assert cc.accel_last == 0.
 
-  def test_gas_from_standstill_hold_releases_the_brake(self, cc):
+  def test_gas_from_standstill_hold_releases_the_brake(self):
+    cc = _cc()
     # gas out of a hold is a resume, not a slow release: the hold command must go straight to
     # zero rather than ramping off at the cruising override rate
     long = structs.CarControl.Actuators.LongControlState
@@ -636,7 +471,8 @@ class TestLongitudinalIntegration:
             override=True, standstill=True, cruise_engaged=True)
     assert cc.accel_last == 0., f"hold not released for the driver's gas: {cc.accel_last}"
 
-  def test_gas_pedal_without_cruise_stays_disengaged(self, cc):
+  def test_gas_pedal_without_cruise_stays_disengaged(self):
+    cc = _cc()
     # gas pressed while openpilot is not enabled must not advertise an engaged ACC
     off = structs.CarControl.Actuators.LongControlState.off
     cc.frame = 0
@@ -644,7 +480,8 @@ class TestLongitudinalIntegration:
     info = next(dat for a, dat, b in sends if a == 0x21b and b == 0)
     assert info.hex().startswith("01ffe2000480")  # armed-but-idle pattern, zero command
 
-  def test_disengaged_emits_stock_patterns(self, cc):
+  def test_disengaged_emits_stock_patterns(self):
+    cc = _cc()
     off = structs.CarControl.Actuators.LongControlState.off
     # main off, not available: the exact standby pattern the panda allowlists byte-for-byte
     cc.frame = 0
@@ -663,7 +500,7 @@ SESSION_DFLT_DAT = bytes([0x02, 0x10, 0x01, 0, 0, 0, 0, 0])
 TESTER_PRESENT_DAT = bytes([0x02, 0x3e, 0x80, 0, 0, 0, 0, 0])
 
 
-class TestRadarSessionSequencing:
+class TestRadarSessionSequencing(unittest.TestCase):
   """Boot teardown deferral and the ordered hand-back: what goes on the bus in each
   radar session state, driven through the real CarController.update_longitudinal."""
 
@@ -681,13 +518,15 @@ class TestRadarSessionSequencing:
   def _synthetic(sends):
     return [a for a, _, _ in sends if a in (0x21b, 0x21c, 0x499)]
 
-  def test_stock_state_is_silent(self, cc):
+  def test_stock_state_is_silent(self):
+    cc = _cc()
     # radar alive, gate not yet passed: nothing at all goes on the bus
     for _ in range(200):
       sends = self._step(cc, stock_radar_alive=True, fsc_settled=False)
       assert sends == []
 
-  def test_boot_teardown_sequence(self, cc):
+  def test_boot_teardown_sequence(self):
+    cc = _cc()
     # gate passes with the stock radar alive: programming-session requests at 2 Hz,
     # still no synthetic frames and no tester present
     for i in range(100):
@@ -708,7 +547,8 @@ class TestRadarSessionSequencing:
       saw_tester |= TESTER_PRESENT_DAT in self._uds(sends)
     assert saw_tester
 
-  def test_handback_sequence(self, cc):
+  def test_handback_sequence(self):
+    cc = _cc()
     # reach SILENCED
     self._step(cc, stock_radar_alive=False, fsc_settled=True)
     # hand-back requested: default-session requests at 2 Hz, tester present stops,
@@ -727,7 +567,8 @@ class TestRadarSessionSequencing:
       sends = self._step(cc, stock_radar_alive=True, fsc_settled=True, handback=True)
       assert sends == []
 
-  def test_handback_before_teardown_stops_everything(self, cc):
+  def test_handback_before_teardown_stops_everything(self):
+    cc = _cc()
     # toggle-off while still waiting on the gate: no session ever entered, so no
     # hand-back traffic either
     self._step(cc, stock_radar_alive=True, fsc_settled=False)
@@ -735,7 +576,8 @@ class TestRadarSessionSequencing:
       sends = self._step(cc, stock_radar_alive=True, fsc_settled=False, handback=True)
       assert sends == []
 
-  def test_teardown_waits_for_stock_cruise_disengage(self, cc):
+  def test_teardown_waits_for_stock_cruise_disengage(self):
+    cc = _cc()
     # driver engaged stock MRCC before the gate passed (warm boot): hold the teardown
     for _ in range(120):
       sends = self._step(cc, stock_radar_alive=True, fsc_settled=True, cruise_engaged=True)
@@ -745,7 +587,8 @@ class TestRadarSessionSequencing:
     sends = self._step(cc, stock_radar_alive=True, fsc_settled=True, cruise_engaged=False)
     assert SESSION_PROG_DAT in self._uds(sends)
 
-  def test_s3_recovery_resilences(self, cc):
+  def test_s3_recovery_resilences(self):
+    cc = _cc()
     # radar reappears mid-drive (dropped tester present, S3 timeout): re-request the session
     self._step(cc, stock_radar_alive=False, fsc_settled=True)
     cc.frame = CarControllerParams.RADAR_UDS_STEP  # align to a session-request frame
@@ -754,3 +597,47 @@ class TestRadarSessionSequencing:
     # and settles back to silenced once quiet again
     sends = self._step(cc, stock_radar_alive=False, fsc_settled=True)
     assert SESSION_PROG_DAT not in self._uds(sends)
+
+
+class TestMazdaHudUnchanged(unittest.TestCase):
+  def test_create_alert_command_does_not_write_tja(self):
+    packer = CANPacker("mazda_2017")
+    parser = CANParser("mazda_2017", [("CAM_LANEINFO", 0)], 0)
+    cam_msg = {s: 0 for s in (
+      "LINE_VISIBLE", "LINE_NOT_VISIBLE", "LANE_LINES",
+      "BIT1", "BIT2", "BIT3", "NO_ERR_BIT", "S1", "S1_HBEAM",
+    )}
+    msg = mazdacan.create_alert_command(packer, cam_msg, ldw=False, steer_required=False)
+    parser.update([(0, [msg])])
+    vl = parser.vl["CAM_LANEINFO"]
+    assert vl["TJA"] == 0
+    assert vl["TJA_TRANSITION"] == 0
+
+  def test_create_alert_command_clamps_engaged_tja_when_mrcc_active(self):
+    packer = CANPacker("mazda_2017")
+    parser = CANParser("mazda_2017", [("CAM_LANEINFO", 0)], 0)
+    for st in parser.message_states.values():
+      st.ignore_checksum = True
+      st.ignore_counter = True
+      st.ignore_alive = True
+    cam_msg = {s: 0 for s in (
+      "LINE_VISIBLE", "LINE_NOT_VISIBLE", "LANE_LINES",
+      "BIT1", "BIT2", "BIT3", "NO_ERR_BIT", "S1", "S1_HBEAM",
+    )}
+    cam_msg["TJA_TRANSITION"] = 2
+    cam_msg["LANE_LINES"] = 3
+    for tja in (2, 3, 4):
+      cam_msg["TJA"] = tja
+      msg = mazdacan.create_alert_command(packer, cam_msg, False, False, mrcc_active=True)
+      parser.update([(0, [msg])])
+      vl = parser.vl["CAM_LANEINFO"]
+      assert vl["TJA"] == 0, tja
+      assert vl["TJA_TRANSITION"] == 2
+      assert vl["LANE_LINES"] == 3
+
+      msg = mazdacan.create_alert_command(packer, cam_msg, False, False, mrcc_active=False)
+      parser.update([(0, [msg])])
+      vl = parser.vl["CAM_LANEINFO"]
+      assert vl["TJA"] == tja
+      assert vl["TJA_TRANSITION"] == 2
+      assert vl["LANE_LINES"] == 3

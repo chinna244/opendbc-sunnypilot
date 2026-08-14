@@ -27,9 +27,166 @@
 #define MAZDA_PARAM_LONGITUDINAL 1U
 #define MAZDA_PARAM_TJA 2U
 
+// Physical CRZ_BTNS bits (DBC Motorola start bit == GET_BIT flat numbering).
+#define MAZDA_CRZ_BTNS_TJA_BIT 11U
+#define MAZDA_CRZ_BTNS_MRCC_BIT 15U
+#define MAZDA_CRZ_BTNS_SET_P_BIT 4U
+#define MAZDA_CRZ_BTNS_SET_M_BIT 5U
+#define MAZDA_CRZ_BTNS_RES_BIT 2U
+#define MAZDA_CRZ_BTNS_CAN_OFF_BIT 0U
+#define MAZDA_CRZ_BTNS_MODE_Y_BIT 13U
+#define MAZDA_CRZ_BTNS_MODE_X_BIT 14U
+
+// Per-edge MRCC restore. Physical TJA toggles MADS only. OEM TJA_BUTTON may
+// also flip cruise OFF↔ARMED. After TJA release, if the post-TJA cruise state
+// differs from the confident pre-edge snapshot, allow one bounded clean
+// MRCC_BUTTON gesture to restore that snapshot.
+//
+// One logical press on the combined wheel+synth stream: fill a single 10 Hz
+// wheel period with one locked CTR, then stop. Spanning a wheel idle is a
+// second press (route 00000019). Panda independently closes the window when
+// a later physical wheel CTR arrives after restore TX has started.
+// Pre-ACTIVE / UNKNOWN never authorize. Lateral (MADS) does not gate.
+#define MAZDA_RESTORE_NONE 0U
+#define MAZDA_RESTORE_OFF 1U
+#define MAZDA_RESTORE_ARMED 2U
+#define MAZDA_RESTORE_WINDOW_US 500000U
+#define MAZDA_RESTORE_MRCC_MAX_TX 10U
+#define MAZDA_RESTORE_CTR_UNSET 0xFFU
+
+typedef enum {
+  MAZDA_TJA_UNINITIALIZED = 0,
+  MAZDA_TJA_ARMED = 1,
+  MAZDA_TJA_HELD = 2,
+  MAZDA_TJA_WAIT_FOR_RELEASE = 3,
+} MazdaTjaEdgeState;
+
 static bool mazda_longitudinal = false;
 static bool mazda_tja_button = false;
-static bool mazda_tja_button_released = false;
+static MazdaTjaEdgeState mazda_tja_edge_state = MAZDA_TJA_UNINITIALIZED;
+static uint8_t mazda_restore_target = MAZDA_RESTORE_NONE;
+static bool mazda_restore_released = false;
+static bool mazda_restore_seen_mismatch = false;
+static uint8_t mazda_restore_tx = 0;
+static uint32_t mazda_restore_ts = 0;
+static uint8_t mazda_restore_ctr = MAZDA_RESTORE_CTR_UNSET;
+static uint8_t mazda_last_rx_ctr = MAZDA_RESTORE_CTR_UNSET;
+static uint8_t mazda_restore_period_ctr = MAZDA_RESTORE_CTR_UNSET;
+
+static void mazda_tja_edge_reset(void) {
+  mazda_tja_edge_state = MAZDA_TJA_UNINITIALIZED;
+}
+
+static void mazda_restore_reset(void) {
+  mazda_restore_target = MAZDA_RESTORE_NONE;
+  mazda_restore_released = false;
+  mazda_restore_seen_mismatch = false;
+  mazda_restore_tx = 0;
+  mazda_restore_ts = 0;
+  mazda_restore_ctr = MAZDA_RESTORE_CTR_UNSET;
+  mazda_restore_period_ctr = MAZDA_RESTORE_CTR_UNSET;
+}
+
+static bool mazda_crz_btns_restore_mrcc(const CANPacket_t *msg) {
+  // MRCC_BUTTON only: TJA/SET/RES/CANCEL/MODE bits must be 0.
+  return GET_BIT(msg, MAZDA_CRZ_BTNS_MRCC_BIT) &&
+         !GET_BIT(msg, MAZDA_CRZ_BTNS_CAN_OFF_BIT) &&
+         !GET_BIT(msg, MAZDA_CRZ_BTNS_RES_BIT) &&
+         !GET_BIT(msg, MAZDA_CRZ_BTNS_SET_P_BIT) &&
+         !GET_BIT(msg, MAZDA_CRZ_BTNS_SET_M_BIT) &&
+         !GET_BIT(msg, MAZDA_CRZ_BTNS_TJA_BIT) &&
+         !GET_BIT(msg, MAZDA_CRZ_BTNS_MODE_Y_BIT) &&
+         !GET_BIT(msg, MAZDA_CRZ_BTNS_MODE_X_BIT);
+}
+
+static bool mazda_crz_btns_driver_long(const CANPacket_t *msg) {
+  return GET_BIT(msg, MAZDA_CRZ_BTNS_MRCC_BIT) ||
+         GET_BIT(msg, MAZDA_CRZ_BTNS_SET_P_BIT) ||
+         GET_BIT(msg, MAZDA_CRZ_BTNS_SET_M_BIT) ||
+         GET_BIT(msg, MAZDA_CRZ_BTNS_RES_BIT) ||
+         GET_BIT(msg, MAZDA_CRZ_BTNS_CAN_OFF_BIT);
+}
+
+static bool mazda_restore_mismatch(void) {
+  // Only restore when post-TJA cruise differs from the snapshot in an allowed way.
+  // ACTIVE (controls_allowed) is never a restore target.
+  bool mismatch = false;
+  if (controls_allowed) {
+    mismatch = false;
+  } else if (mazda_restore_target == MAZDA_RESTORE_OFF) {
+    mismatch = acc_main_on;
+  } else if (mazda_restore_target == MAZDA_RESTORE_ARMED) {
+    mismatch = !acc_main_on;
+  } else {
+    mismatch = false;
+  }
+  return mismatch;
+}
+
+static bool mazda_restore_window_open(void) {
+  // MADS/lateral may be on or off: restore is per-edge, not session-owned.
+  bool open = false;
+  if (!mazda_tja_button || (mazda_restore_target == MAZDA_RESTORE_NONE) ||
+      !mazda_restore_released || !mazda_restore_mismatch()) {
+    open = false;
+  } else if (mazda_restore_tx >= MAZDA_RESTORE_MRCC_MAX_TX) {
+    mazda_restore_reset();
+    open = false;
+  } else {
+    const uint32_t elapsed = safety_get_ts_elapsed(microsecond_timer_get(), mazda_restore_ts);
+    if (elapsed > MAZDA_RESTORE_WINDOW_US) {
+      mazda_restore_reset();
+      open = false;
+    } else {
+      open = true;
+    }
+  }
+  return open;
+}
+
+static void mazda_restore_cruise_update(void) {
+  if (controls_allowed) {
+    // Became ACTIVE: driver longitudinal action. Never send MRCC to "preserve" ACTIVE.
+    mazda_restore_reset();
+  } else if (!mazda_restore_released || (mazda_restore_target == MAZDA_RESTORE_NONE)) {
+    // no restore in flight
+  } else if (mazda_restore_mismatch()) {
+    mazda_restore_seen_mismatch = true;
+  } else if (mazda_restore_seen_mismatch) {
+    // Side-effect then returned to the snapshot: restore succeeded.
+    mazda_restore_reset();
+  } else {
+    // snapshot still matches; keep waiting
+  }
+}
+
+// Advance one physical CRZ_BTNS TJA sample. Returns true if and only if this sample toggles MADS once.
+// Boot-held TJA (first sample = 1) does not toggle. Held frames do not repeat-toggle.
+static bool mazda_tja_edge_update(const bool tja_pressed) {
+  bool toggle = false;
+
+  if (mazda_tja_edge_state == MAZDA_TJA_UNINITIALIZED) {
+    mazda_tja_edge_state = tja_pressed ? MAZDA_TJA_WAIT_FOR_RELEASE : MAZDA_TJA_ARMED;
+  } else if (mazda_tja_edge_state == MAZDA_TJA_WAIT_FOR_RELEASE) {
+    if (!tja_pressed) {
+      mazda_tja_edge_state = MAZDA_TJA_ARMED;
+    }
+  } else if (mazda_tja_edge_state == MAZDA_TJA_ARMED) {
+    if (tja_pressed) {
+      toggle = true;
+      mazda_tja_edge_state = MAZDA_TJA_HELD;
+    }
+  } else if (mazda_tja_edge_state == MAZDA_TJA_HELD) {
+    if (!tja_pressed) {
+      mazda_tja_edge_state = MAZDA_TJA_ARMED;
+    }
+  } else {
+    // Unknown state: fail closed. A missed toggle is allowed; an extra is not.
+    mazda_tja_edge_state = MAZDA_TJA_UNINITIALIZED;
+  }
+
+  return toggle;
+}
 
 // With longitudinal control the stock radar is silenced and openpilot replays its frames,
 // so allowed tx patterns are pinned to byte-exact stock captures wherever possible.
@@ -66,7 +223,7 @@ static bool mazda_empty_radar_track_msg_valid(const CANPacket_t *msg) {
             (msg->data[4] == 0xfbU) && (msg->data[5] == 0xffU) &&
             (msg->data[6] == 0x3fU) && ((msg->data[7] & 0xf0U) == 0xc0U);
   } else {
-    // Addresses outside the six radar tracks are invalid.
+    // Caller only uses this for TRACK_1..TRACK_6.
   }
 
   return valid;
@@ -104,16 +261,63 @@ static void mazda_rx_hook(const CANPacket_t *msg) {
     if ((msg->addr == MAZDA_CRZ_CTRL) && !mazda_longitudinal) {
       bool cruise_engaged = msg->data[0] & 0x8U;
       pcm_cruise_check(cruise_engaged);
-      if (!mazda_tja_button) {
-        acc_main_on = GET_BIT(msg, 17U);
-      }
+      acc_main_on = GET_BIT(msg, 17U);
+      mazda_restore_cruise_update();
     }
 
     if ((msg->addr == MAZDA_CRZ_BTNS) && mazda_tja_button) {
-      const bool tja_pressed = GET_BIT(msg, 11U);
-      const bool tja_authorization_shape = tja_pressed && !GET_BIT(msg, 15U) && GET_BIT(msg, 16U);
-      mazda_tja_button_released = mazda_tja_button_released || !tja_pressed;
-      mads_button_press = (tja_authorization_shape && mazda_tja_button_released) ? MADS_BUTTON_PRESSED : MADS_BUTTON_NOT_PRESSED;
+      // Single physical TJA rising edge toggles MADS/lateral exactly once.
+      // Brake/gas/MRCC/SET/RES/CANCEL are not gesture conflicts.
+      const bool tja_pressed = GET_BIT(msg, MAZDA_CRZ_BTNS_TJA_BIT);
+      const bool was_held = (mazda_tja_edge_state == MAZDA_TJA_HELD);
+      const bool toggle = mazda_tja_edge_update(tja_pressed);
+      const bool released = was_held && !tja_pressed;
+      const bool driver_long = mazda_crz_btns_driver_long(msg);
+      const uint8_t rx_ctr = (msg->data[3] >> 2) & 0x0FU;
+      mazda_last_rx_ctr = rx_ctr;
+
+      mads_button_press = MADS_BUTTON_NOT_PRESSED;
+      if (toggle) {
+        // Every physical TJA edge: snapshot OEM cruise and toggle MADS.
+        // Restore only if post-TJA cruise later differs from this snapshot.
+        mazda_restore_reset();
+        if (!acc_main_on && !controls_allowed) {
+          mazda_restore_target = MAZDA_RESTORE_OFF;
+        } else if (acc_main_on && !controls_allowed) {
+          mazda_restore_target = MAZDA_RESTORE_ARMED;
+        } else {
+          // ACTIVE: never a restore target
+        }
+        if (controls_allowed_lateral) {
+          mads_exit_controls(MADS_DISENGAGE_REASON_BUTTON);
+        } else {
+          mads_button_press = MADS_BUTTON_PRESSED;
+        }
+      } else if (released && (mazda_restore_target != MAZDA_RESTORE_NONE)) {
+        mazda_restore_released = true;
+        mazda_restore_ts = microsecond_timer_get();
+        mazda_restore_tx = 0;
+        if (mazda_restore_mismatch()) {
+          mazda_restore_seen_mismatch = true;
+        }
+      } else {
+        // held/idle sample: no snapshot change
+      }
+
+      if (driver_long && (mazda_restore_target != MAZDA_RESTORE_NONE)) {
+        mazda_restore_reset();
+      }
+      // Held TJA after release is a new gesture; close the window.
+      if (mazda_restore_released && tja_pressed) {
+        mazda_restore_reset();
+      }
+      // Physical wheel idle on a new CTR after restore TX is the logical
+      // release. Further synthetic MRCC would be press→release→press.
+      if ((mazda_restore_tx > 0U) && !tja_pressed && !driver_long &&
+          (mazda_restore_period_ctr != MAZDA_RESTORE_CTR_UNSET) &&
+          (rx_ctr != mazda_restore_period_ctr)) {
+        mazda_restore_reset();
+      }
     }
 
     if ((msg->addr == MAZDA_CRZ_BTNS) && mazda_longitudinal) {
@@ -142,6 +346,7 @@ static void mazda_rx_hook(const CANPacket_t *msg) {
           acc_main_on = acc_armed;
           pcm_cruise_check(cruise_engaged);
         }
+        mazda_restore_cruise_update();
       }
       brake_pressed = brake;
     }
@@ -180,8 +385,15 @@ static bool mazda_tx_hook(const CANPacket_t *msg) {
   if (main_bus && (msg->addr == MAZDA_LKAS)) {
     int desired_torque = (((msg->data[0] & 0x0FU) << 8) | msg->data[1]) - 2048U;
 
-    if (steer_torque_cmd_checks(desired_torque, -1, MAZDA_STEERING_LIMITS)) {
+    // TJA platforms: lateral torque is owned solely by controls_allowed_lateral (MADS/TJA).
+    // MRCC/longitudinal controls_allowed alone must not authorize nonzero steering.
+    // Zero torque remains allowed for safe disengagement. Non-TJA Mazdas unchanged.
+    if (mazda_tja_button && !controls_allowed_lateral && (desired_torque != 0)) {
       tx = false;
+    } else if (steer_torque_cmd_checks(desired_torque, -1, MAZDA_STEERING_LIMITS)) {
+      tx = false;
+    } else {
+      // torque within limits
     }
   }
 
@@ -195,10 +407,10 @@ static bool mazda_tx_hook(const CANPacket_t *msg) {
                          (msg->data[7] == ((0x5dU - msg->data[6]) & 0xffU));
 
     // 13-bit ACCEL_CMD: data[2] low bits, data[3], data[4] high bits, offset 4096
-    const uint16_t desired_accel_raw = (((uint16_t)msg->data[2] & 0x3U) << 11U) |
-                                       ((uint16_t)msg->data[3] << 3U) |
-                                       ((uint16_t)msg->data[4] >> 5U);
-    const int desired_accel = (int)desired_accel_raw - 4096;
+    const uint32_t raw_accel = (((uint32_t)msg->data[2] & 0x3U) << 11) |
+                               ((uint32_t)msg->data[3] << 3) |
+                               ((uint32_t)msg->data[4] >> 5);
+    int desired_accel = (int)raw_accel - 4096;
     if (!stock_standby && longitudinal_accel_checks(desired_accel, MAZDA_LONG_LIMITS)) {
       tx = false;
     }
@@ -235,11 +447,42 @@ static bool mazda_tx_hook(const CANPacket_t *msg) {
 
   // cruise buttons check
   if (main_bus && (msg->addr == MAZDA_CRZ_BTNS)) {
-    // allow resume spamming while controls allowed, but
-    // only allow cancel while controls not allowed
-    bool cancel_cmd = (msg->data[0] == 0x1U);
-    if (!controls_allowed && !cancel_cmd) {
+    const bool cancel_cmd = (msg->data[0] == 0x1U);
+    if (mazda_tja_button && GET_BIT(msg, MAZDA_CRZ_BTNS_TJA_BIT)) {
       tx = false;
+    }
+    const bool restore_mrcc = mazda_crz_btns_restore_mrcc(msg);
+    if (restore_mrcc) {
+      if (!mazda_restore_window_open()) {
+        tx = false;
+      } else {
+        // CRZ_BTNS CTR is DBC 29|4@0+ Motorola → data[3] bits 5..2.
+        const uint8_t ctr = (msg->data[3] >> 2) & 0x0FU;
+        if (mazda_restore_ctr == MAZDA_RESTORE_CTR_UNSET) {
+          mazda_restore_ctr = ctr;
+        } else if (ctr != mazda_restore_ctr) {
+          // Second unique CTR is a second logical press. Reject it.
+          tx = false;
+          mazda_restore_reset();
+        } else {
+          // same locked CTR
+        }
+        if (tx) {
+          if (mazda_restore_period_ctr == MAZDA_RESTORE_CTR_UNSET) {
+            mazda_restore_period_ctr = mazda_last_rx_ctr;
+          }
+          mazda_restore_tx += 1U;
+          if (mazda_restore_tx >= MAZDA_RESTORE_MRCC_MAX_TX) {
+            mazda_restore_reset();
+          }
+        }
+      }
+    } else if (!controls_allowed && !cancel_cmd) {
+      // allow resume spamming while controls allowed, but
+      // only allow cancel while controls not allowed
+      tx = false;
+    } else {
+      // cancel while disallowed, or any button while controls_allowed
     }
   }
 
@@ -296,10 +539,10 @@ static safety_config mazda_init(uint16_t param) {
 
   mazda_longitudinal = GET_FLAG(param, MAZDA_PARAM_LONGITUDINAL);
   mazda_tja_button = GET_FLAG(param, MAZDA_PARAM_TJA);
-  mazda_tja_button_released = false;
   mads_physical_button_only = mazda_tja_button;
+  mazda_tja_edge_reset();
+  mazda_restore_reset();
   acc_main_on = false;
-  mads_button_press = MADS_BUTTON_UNAVAILABLE;
 
   return mazda_longitudinal ? BUILD_SAFETY_CFG(mazda_long_rx_checks, MAZDA_LONG_TX_MSGS) :
                               BUILD_SAFETY_CFG(mazda_rx_checks, MAZDA_TX_MSGS);
@@ -310,3 +553,18 @@ const safety_hooks mazda_hooks = {
   .rx = mazda_rx_hook,
   .tx = mazda_tx_hook,
 };
+
+#ifdef ALLOW_DEBUG
+// Test-only accessors. Not compiled into car firmware (ALLOW_DEBUG is libsafety/mutation).
+void set_mazda_tja_edge_state(uint8_t s) {
+  mazda_tja_edge_state = (MazdaTjaEdgeState)s;
+}
+
+void set_mazda_restore_debug(uint8_t target, bool released, uint8_t tx) {
+  mazda_restore_target = target;
+  mazda_restore_released = released;
+  mazda_restore_tx = tx;
+  mazda_restore_ts = microsecond_timer_get();
+  mazda_restore_seen_mismatch = true;
+}
+#endif
