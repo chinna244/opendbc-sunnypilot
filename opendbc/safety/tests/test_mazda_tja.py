@@ -550,6 +550,63 @@ class TestMazdaTjaSafety(unittest.TestCase):
     # Stock Mazda DriverTorqueLimited: large opposing driver torque must still block.
     self.assertFalse(self._tx(self._torque_cmd_msg(200)))
 
+  def test_restore_mismatch_rejects_when_controls_allowed(self):
+    """Line 114: ACTIVE/controls_allowed is never a restore target."""
+    self._open_restore_window()
+    self.assertTrue(self._tx(self._tja_button_msg(mrcc=True)))
+    self.safety.set_controls_allowed(True)
+    self.assertTrue(self.safety.get_controls_allowed())
+    self.assertFalse(self._tx(self._tja_button_msg(mrcc=True)))
+    self.assertTrue(self.safety.get_controls_allowed())
+
+  def test_restore_mismatch_unknown_target_fail_closed(self):
+    """Line 122: target other than OFF/ARMED never authorizes restore TX."""
+    self._open_restore_window()
+    self.safety.set_mazda_restore_debug(99, True, 0)
+    self.assertFalse(self._tx(self._tja_button_msg(mrcc=True)))
+    self.assertFalse(self.safety.get_controls_allowed())
+
+  def test_restore_window_tx_cap_checked_before_grant(self):
+    """Lines 132-133: tx already at MAX with window still armed is fail-closed."""
+    self._open_restore_window()
+    # OFF target = 1. Keep released/mismatch, force tx to the cap without post-TX reset.
+    self.safety.set_mazda_restore_debug(1, True, 10)
+    self.assertFalse(self._tx(self._tja_button_msg(mrcc=True)))
+    self.assertFalse(self.safety.get_controls_allowed())
+
+  def test_tja_edge_unknown_state_fail_closed_no_toggle(self):
+    """Line 182: unknown edge state resets to UNINITIALIZED and must not toggle."""
+    self.assertTrue(self._rx(self._tja_button_msg(False)))
+    self.assertFalse(self.safety.get_controls_allowed_lateral())
+    self.safety.set_mazda_tja_edge_state(99)
+    self.assertTrue(self._rx(self._tja_button_msg(True)))
+    self.assertFalse(self.safety.get_controls_allowed_lateral())
+    # Boot-held after fail-closed init: still no toggle while held.
+    self.assertTrue(self._rx(self._tja_button_msg(True)))
+    self.assertFalse(self.safety.get_controls_allowed_lateral())
+    self.assertTrue(self._rx(self._tja_button_msg(False)))
+    self.assertTrue(self._rx(self._tja_button_msg(True)))
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+
+  def test_held_tja_after_release_closes_window_without_toggle(self):
+    """Line 303: tja_pressed after release closes restore even if it is not a toggle."""
+    self._open_restore_window()
+    self.assertTrue(self._tx(self._tja_button_msg(mrcc=True)))
+    # Force non-ARMED so RX TJA=1 does not toggle (which would reset earlier).
+    self.safety.set_mazda_tja_edge_state(0)  # UNINITIALIZED -> WAIT_FOR_RELEASE, no toggle
+    lat = self.safety.get_controls_allowed_lateral()
+    self.assertTrue(self._rx(self._tja_button_msg(True)))
+    self.assertEqual(lat, self.safety.get_controls_allowed_lateral())
+    self.assertFalse(self._tx(self._tja_button_msg(mrcc=True)))
+
+  def test_longitudinal_rx_cancel_clears_controls_allowed(self):
+    """Line 318: driver CAN_OFF on CRZ_BTNS always exits longitudinal controls."""
+    self._configure_tja_mads(longitudinal=True)
+    self.safety.set_controls_allowed(True)
+    self.assertTrue(self.safety.get_controls_allowed())
+    self.assertTrue(self._rx(self._tja_button_msg(cancel=True)))
+    self.assertFalse(self.safety.get_controls_allowed())
+    self.assertFalse(self._tx(self._tja_button_msg(mrcc=True)))
 
 class TestMazdaTjaParityFuzz(unittest.TestCase):
   def setUp(self):
@@ -621,7 +678,6 @@ class TestMazdaTjaParityFuzz(unittest.TestCase):
       if bool(self.safety.get_controls_allowed_lateral()) != lat:
         changed += 1
     self.assertEqual(0, changed)
-
 
 if __name__ == "__main__":
   unittest.main()

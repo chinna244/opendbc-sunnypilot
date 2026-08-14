@@ -110,54 +110,57 @@ static bool mazda_crz_btns_driver_long(const CANPacket_t *msg) {
 static bool mazda_restore_mismatch(void) {
   // Only restore when post-TJA cruise differs from the snapshot in an allowed way.
   // ACTIVE (controls_allowed) is never a restore target.
+  bool mismatch = false;
   if (controls_allowed) {
-    return false;
+    mismatch = false;
+  } else if (mazda_restore_target == MAZDA_RESTORE_OFF) {
+    mismatch = acc_main_on;
+  } else if (mazda_restore_target == MAZDA_RESTORE_ARMED) {
+    mismatch = !acc_main_on;
+  } else {
+    mismatch = false;
   }
-  if (mazda_restore_target == MAZDA_RESTORE_OFF) {
-    return acc_main_on;
-  }
-  if (mazda_restore_target == MAZDA_RESTORE_ARMED) {
-    return !acc_main_on;
-  }
-  return false;
+  return mismatch;
 }
 
 static bool mazda_restore_window_open(void) {
   // MADS/lateral may be on or off: restore is per-edge, not session-owned.
+  bool open = false;
   if (!mazda_tja_button || (mazda_restore_target == MAZDA_RESTORE_NONE) ||
       !mazda_restore_released || !mazda_restore_mismatch()) {
-    return false;
-  }
-  if (mazda_restore_tx >= MAZDA_RESTORE_MRCC_MAX_TX) {
+    open = false;
+  } else if (mazda_restore_tx >= MAZDA_RESTORE_MRCC_MAX_TX) {
     mazda_restore_reset();
-    return false;
+    open = false;
+  } else {
+    const uint32_t elapsed = safety_get_ts_elapsed(microsecond_timer_get(), mazda_restore_ts);
+    if (elapsed > MAZDA_RESTORE_WINDOW_US) {
+      mazda_restore_reset();
+      open = false;
+    } else {
+      open = true;
+    }
   }
-  const uint32_t elapsed = safety_get_ts_elapsed(microsecond_timer_get(), mazda_restore_ts);
-  if (elapsed > MAZDA_RESTORE_WINDOW_US) {
-    mazda_restore_reset();
-    return false;
-  }
-  return true;
+  return open;
 }
 
 static void mazda_restore_cruise_update(void) {
   if (controls_allowed) {
     // Became ACTIVE: driver longitudinal action. Never send MRCC to "preserve" ACTIVE.
     mazda_restore_reset();
-    return;
-  }
-  if (!mazda_restore_released || (mazda_restore_target == MAZDA_RESTORE_NONE)) {
-    return;
-  }
-  if (mazda_restore_mismatch()) {
+  } else if (!mazda_restore_released || (mazda_restore_target == MAZDA_RESTORE_NONE)) {
+    // no restore in flight
+  } else if (mazda_restore_mismatch()) {
     mazda_restore_seen_mismatch = true;
   } else if (mazda_restore_seen_mismatch) {
     // Side-effect then returned to the snapshot: restore succeeded.
     mazda_restore_reset();
+  } else {
+    // snapshot still matches; keep waiting
   }
 }
 
-// Advance one physical CRZ_BTNS TJA sample. Returns true iff this sample toggles MADS once.
+// Advance one physical CRZ_BTNS TJA sample. Returns true if and only if this sample toggles MADS once.
 // Boot-held TJA (first sample = 1) does not toggle. Held frames do not repeat-toggle.
 static bool mazda_tja_edge_update(const bool tja_pressed) {
   bool toggle = false;
@@ -219,6 +222,8 @@ static bool mazda_empty_radar_track_msg_valid(const CANPacket_t *msg) {
             (msg->data[2] == 0xfeU) && (msg->data[3] == 0x7fU) &&
             (msg->data[4] == 0xfbU) && (msg->data[5] == 0xffU) &&
             (msg->data[6] == 0x3fU) && ((msg->data[7] & 0xf0U) == 0xc0U);
+  } else {
+    // Caller only uses this for TRACK_1..TRACK_6.
   }
 
   return valid;
@@ -280,6 +285,8 @@ static void mazda_rx_hook(const CANPacket_t *msg) {
           mazda_restore_target = MAZDA_RESTORE_OFF;
         } else if (acc_main_on && !controls_allowed) {
           mazda_restore_target = MAZDA_RESTORE_ARMED;
+        } else {
+          // ACTIVE: never a restore target
         }
         if (controls_allowed_lateral) {
           mads_exit_controls(MADS_DISENGAGE_REASON_BUTTON);
@@ -293,6 +300,8 @@ static void mazda_rx_hook(const CANPacket_t *msg) {
         if (mazda_restore_mismatch()) {
           mazda_restore_seen_mismatch = true;
         }
+      } else {
+        // held/idle sample: no snapshot change
       }
 
       if (driver_long && (mazda_restore_target != MAZDA_RESTORE_NONE)) {
@@ -383,6 +392,8 @@ static bool mazda_tx_hook(const CANPacket_t *msg) {
       tx = false;
     } else if (steer_torque_cmd_checks(desired_torque, -1, MAZDA_STEERING_LIMITS)) {
       tx = false;
+    } else {
+      // torque within limits
     }
   }
 
@@ -396,7 +407,10 @@ static bool mazda_tx_hook(const CANPacket_t *msg) {
                          (msg->data[7] == ((0x5dU - msg->data[6]) & 0xffU));
 
     // 13-bit ACCEL_CMD: data[2] low bits, data[3], data[4] high bits, offset 4096
-    int desired_accel = ((((int)msg->data[2] & 0x3) << 11) | (((int)msg->data[3]) << 3) | (((int)msg->data[4]) >> 5)) - 4096;
+    const uint32_t raw_accel = (((uint32_t)msg->data[2] & 0x3U) << 11) |
+                               ((uint32_t)msg->data[3] << 3) |
+                               ((uint32_t)msg->data[4] >> 5);
+    int desired_accel = (int)raw_accel - 4096;
     if (!stock_standby && longitudinal_accel_checks(desired_accel, MAZDA_LONG_LIMITS)) {
       tx = false;
     }
@@ -450,6 +464,8 @@ static bool mazda_tx_hook(const CANPacket_t *msg) {
           // Second unique CTR is a second logical press. Reject it.
           tx = false;
           mazda_restore_reset();
+        } else {
+          // same locked CTR
         }
         if (tx) {
           if (mazda_restore_period_ctr == MAZDA_RESTORE_CTR_UNSET) {
@@ -465,6 +481,8 @@ static bool mazda_tx_hook(const CANPacket_t *msg) {
       // allow resume spamming while controls allowed, but
       // only allow cancel while controls not allowed
       tx = false;
+    } else {
+      // cancel while disallowed, or any button while controls_allowed
     }
   }
 
@@ -535,3 +553,18 @@ const safety_hooks mazda_hooks = {
   .rx = mazda_rx_hook,
   .tx = mazda_tx_hook,
 };
+
+#ifdef ALLOW_DEBUG
+// Test-only accessors. Not compiled into car firmware (ALLOW_DEBUG is libsafety/mutation).
+void set_mazda_tja_edge_state(uint8_t s) {
+  mazda_tja_edge_state = (MazdaTjaEdgeState)s;
+}
+
+void set_mazda_restore_debug(uint8_t target, bool released, uint8_t tx) {
+  mazda_restore_target = target;
+  mazda_restore_released = released;
+  mazda_restore_tx = tx;
+  mazda_restore_ts = microsecond_timer_get();
+  mazda_restore_seen_mismatch = true;
+}
+#endif
