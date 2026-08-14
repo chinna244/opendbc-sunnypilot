@@ -342,7 +342,10 @@ class CarState(CarStateBase, CarStateExt):
     cam_messages = [
       # read through vl_all, which unlike vl has no lazy registration
       ("CAM_LANEINFO", 0),
-      ("CAM_TRAFFIC_SIGNS", 0),
+      # Present on some Mazda cameras only. The 2020 CX-9 model-test route has
+      # zero 0x35f frames; a freq-0 liveness check makes canValid false for the
+      # entire route (5745 invalid iterations). Not used by TJA/MADS/MRCC.
+      ("CAM_TRAFFIC_SIGNS", float("nan")),
     ]
     return {
       Bus.pt: CANParser(DBC[CP.carFingerprint][Bus.pt], pt_messages, 0),
