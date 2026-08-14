@@ -472,6 +472,8 @@ int set_safety_hooks(uint16_t mode, uint16_t param) {
   reset_sample(&curvature_state.meas);
 
   controls_allowed = false;
+  mads_physical_button_only = false;
+  m_mads_state_reset();
   relay_malfunction_reset();
   safety_rx_checks_invalid = false;
 

@@ -17,6 +17,7 @@ ButtonState mads_button_press = MADS_BUTTON_UNAVAILABLE;
 MADSState m_mads_state;
 
 bool controls_allowed_lateral = false;
+bool mads_physical_button_only = false;
 
 // state for mads controls_allowed_lateral timeout logic
 bool heartbeat_engaged_mads = false;  // MADS enabled, passed in heartbeat USB command
@@ -41,6 +42,7 @@ inline EdgeTransition m_get_edge_transition(const bool current, const bool last)
 }
 
 inline void m_mads_state_init(void) {
+  mads_button_press = MADS_BUTTON_UNAVAILABLE;
   m_mads_state.is_vehicle_moving = NULL;
   m_mads_state.acc_main.current = NULL;
   m_mads_state.mads_button.current = MADS_BUTTON_UNAVAILABLE;
@@ -63,6 +65,19 @@ inline void m_mads_state_init(void) {
   controls_allowed_lateral = false;
 }
 
+inline void m_mads_state_reset(void) {
+  const bool system_enabled = m_mads_state.system_enabled;
+  const bool disengage_lateral_on_brake = m_mads_state.disengage_lateral_on_brake;
+  const bool pause_lateral_on_brake = m_mads_state.pause_lateral_on_brake;
+
+  m_mads_state_init();
+  m_mads_state.system_enabled = system_enabled;
+  m_mads_state.disengage_lateral_on_brake = disengage_lateral_on_brake;
+  m_mads_state.pause_lateral_on_brake = pause_lateral_on_brake;
+  heartbeat_engaged_mads = false;
+  heartbeat_engaged_mads_mismatches = 0U;
+}
+
 inline void m_update_button_state(ButtonStateTracking *button_state) {
   if (button_state->current != MADS_BUTTON_UNAVAILABLE) {
     button_state->transition = m_get_edge_transition(button_state->current == MADS_BUTTON_PRESSED, button_state->last == MADS_BUTTON_PRESSED);
@@ -82,27 +97,47 @@ inline void m_update_binary_state(BinaryStateTracking *state) {
  */
 inline void m_update_control_state(void) {
   bool allowed = true;
+  const bool physical_button_rising = m_mads_state.mads_button.transition == MADS_EDGE_RISING;
 
-  // Initial control requests from button or ACC transitions
-  if ((m_mads_state.acc_main.transition == MADS_EDGE_RISING) ||
-      (m_mads_state.mads_button.transition == MADS_EDGE_RISING) ||
-      (m_mads_state.op_controls_allowed.transition == MADS_EDGE_RISING)) {
+  // Initial control requests from button or ACC transitions.
+  // Physical-button-only platforms (Mazda TJA): ACC main / OP engage must not own lateral.
+  if (physical_button_rising ||
+      (!mads_physical_button_only && ((m_mads_state.acc_main.transition == MADS_EDGE_RISING) ||
+                                      (m_mads_state.op_controls_allowed.transition == MADS_EDGE_RISING)))) {
     m_mads_state.controls_requested_lateral = true;
   }
 
+  // A new physical authorization starts a new heartbeat grace window. Without this,
+  // mismatch history from the preceding OFF session can revoke the fresh request before
+  // the next host heartbeat delivers the new MADS state.
+  if (mads_physical_button_only && physical_button_rising) {
+    heartbeat_engaged_mads_mismatches = 0U;
+  }
+
   // Primary control blockers - these prevent any further control processing
-  if (m_mads_state.acc_main.transition == MADS_EDGE_FALLING) {
+  if (!mads_physical_button_only && (m_mads_state.acc_main.transition == MADS_EDGE_FALLING)) {
     mads_exit_controls(MADS_DISENGAGE_REASON_ACC_MAIN_OFF);
     allowed = false;  // No matter what, no further control processing on this cycle
   }
 
-  if (m_mads_state.mads_steering_disengage.transition == MADS_EDGE_RISING) {
+  if ((m_mads_state.mads_steering_disengage.transition == MADS_EDGE_RISING) ||
+      (mads_physical_button_only && m_mads_state.mads_steering_disengage.current)) {
     mads_exit_controls(MADS_DISENGAGE_REASON_STEERING_DISENGAGE);
+    m_mads_state.controls_requested_lateral = false;
     allowed = false;  // No matter what, no further control processing on this cycle
   }
 
-  if (m_mads_state.disengage_lateral_on_brake && (m_mads_state.braking.transition == MADS_EDGE_RISING)) {
+  if (m_mads_state.disengage_lateral_on_brake &&
+      ((m_mads_state.braking.transition == MADS_EDGE_RISING) ||
+       (mads_physical_button_only && m_mads_state.braking.current))) {
     mads_exit_controls(MADS_DISENGAGE_REASON_BRAKE);
+    m_mads_state.controls_requested_lateral = false;
+    allowed = false;
+  }
+
+  if (mads_physical_button_only && safety_rx_checks_invalid) {
+    mads_exit_controls(MADS_DISENGAGE_REASON_LAG);
+    m_mads_state.controls_requested_lateral = false;
     allowed = false;
   }
 
