@@ -80,6 +80,27 @@ class TestMazdaSafety(common.CarSafetyTest, common.DriverTorqueSteeringSafetyTes
     self.safety.set_controls_allowed(1)
     self.assertTrue(self._tx(self._button_msg(cancel=True)))
     self.assertTrue(self._tx(self._button_msg(resume=True)))
+    # MRCC_BUTTON is Case-D-window only, never generally allowed
+    self.safety.set_controls_allowed(0)
+    self.assertFalse(self._tx(self.packer.make_can_msg_safety("CRZ_BTNS", 0, {"MRCC_BUTTON": 1})))
+    self.safety.set_controls_allowed(1)
+    self.assertFalse(self._tx(self.packer.make_can_msg_safety("CRZ_BTNS", 0, {"MRCC_BUTTON": 1})))
+
+
+class TestMazdaTjaSafety(unittest.TestCase):
+  """TJA param: still no general synthetic MRCC without a restore window."""
+
+  def setUp(self):
+    self.packer = CANPackerSafety("mazda_2017")
+    self.safety = libsafety_py.libsafety
+    self.safety.set_safety_hooks(CarParams.SafetyModel.mazda, MazdaSafetyFlags.TJA)
+    self.safety.init_tests()
+
+  def test_general_synthetic_mrcc_blocked_without_restore_window(self):
+    for allowed in (False, True):
+      self.safety.set_controls_allowed(int(allowed))
+      msg = self.packer.make_can_msg_safety("CRZ_BTNS", 0, {"MRCC_BUTTON": 1})
+      self.assertFalse(self.safety.safety_tx_hook(msg))
 
 
 class TestMazdaLongitudinalSafety(TestMazdaSafety, common.LongitudinalAccelSafetyTest):
@@ -187,6 +208,126 @@ class TestMazdaLongitudinalSafety(TestMazdaSafety, common.LongitudinalAccelSafet
 
       self.safety.set_controls_allowed(True)
       self.assertTrue(self._tx(self._crz_ctrl_cmd_msg(True, bus)))
+
+
+class TestMazdaRestoreSafety(unittest.TestCase):
+  """Panda independently authorizes one interval-contained MRCC restore."""
+
+  def setUp(self):
+    self.packer = CANPackerSafety("mazda_2017")
+    self.safety = libsafety_py.libsafety
+    self.safety.set_safety_hooks(CarParams.SafetyModel.mazda, MazdaSafetyFlags.TJA)
+    self.safety.init_tests()
+    self.safety.set_controls_allowed(0)
+    self.safety.set_timer(0)
+
+  def _tx(self, msg):
+    return self.safety.safety_tx_hook(msg)
+
+  def _rx(self, msg):
+    return self.safety.safety_rx_hook(msg)
+
+  def _crz_ctrl(self, available, active=False):
+    return self.packer.make_can_msg_safety("CRZ_CTRL", 0, {
+      "CRZ_AVAILABLE": int(available),
+      "CRZ_ACTIVE": int(active),
+    })
+
+  def _btns(self, *, tja=0, mrcc=0, set_p=0, set_m=0, res=0, cancel=0, ctr=3):
+    return self.packer.make_can_msg_safety("CRZ_BTNS", 0, {
+      "TJA_BUTTON": tja,
+      "MRCC_BUTTON": mrcc,
+      "SET_P": set_p,
+      "SET_M": set_m,
+      "RES": res,
+      "CAN_OFF": cancel,
+      "CTR": ctr,
+      "BIT1": 0 if mrcc else 1,
+      "BIT2": 1,
+      "BIT3": 1,
+      "CAN_OFF_INV": 0 if cancel else 1,
+      "SET_P_INV": 0 if set_p else 1,
+      "SET_M_INV": 0 if set_m else 1,
+      "RES_INV": 0 if res else 1,
+      "MODE_X": 0,
+      "MODE_Y": 0,
+      "MODE_X_INV": 1,
+      "MODE_Y_INV": 1,
+    })
+
+  def _open_off_window(self):
+    self._rx(self._crz_ctrl(False))
+    self._rx(self._btns(tja=0, ctr=2))
+    self.safety.set_timer(10000)
+    self._rx(self._btns(tja=1, ctr=3))
+    self._rx(self._btns(tja=0, ctr=3))
+    self._rx(self._crz_ctrl(True))
+
+  def test_general_synthetic_blocked(self):
+    for allowed in (0, 1):
+      self.safety.set_controls_allowed(allowed)
+      self.assertFalse(self._tx(self._btns(mrcc=1)))
+      self.assertFalse(self._tx(self._btns(tja=1)))
+      if not allowed:
+        self.assertFalse(self._tx(self._btns(set_p=1)))
+        self.assertFalse(self._tx(self._btns(res=1)))
+
+  def test_restore_without_tja_rejected(self):
+    self._rx(self._crz_ctrl(True))
+    self.assertFalse(self._tx(self._btns(mrcc=1, ctr=4)))
+
+  def test_restore_accepted_then_next_wheel_closes(self):
+    self._open_off_window()
+    self.assertTrue(self._tx(self._btns(mrcc=1, ctr=4)))
+    self._rx(self._btns(ctr=3))
+    self.assertTrue(self._tx(self._btns(mrcc=1, ctr=4)))
+    self._rx(self._btns(ctr=4))
+    self.assertFalse(self._tx(self._btns(mrcc=1, ctr=4)))
+
+  def test_second_unique_ctr_rejected(self):
+    self._open_off_window()
+    self.assertTrue(self._tx(self._btns(mrcc=1, ctr=4)))
+    self.assertFalse(self._tx(self._btns(mrcc=1, ctr=5)))
+
+  def test_wrong_payload_rejected(self):
+    self._open_off_window()
+    self.assertFalse(self._tx(self._btns(mrcc=1, tja=1, ctr=4)))
+    self.assertFalse(self._tx(self._btns(mrcc=1, set_p=1, ctr=4)))
+    self.assertFalse(self._tx(self._btns(mrcc=1, res=1, ctr=4)))
+    # CAN_OFF is the cancel path, not a restore accept (restore_mrcc requires CAN_OFF=0).
+
+  def test_max_tx_then_reject(self):
+    self._open_off_window()
+    for _ in range(10):
+      self.assertTrue(self._tx(self._btns(mrcc=1, ctr=4)))
+    self.assertFalse(self._tx(self._btns(mrcc=1, ctr=4)))
+
+  def test_timeout_rejected(self):
+    self._open_off_window()
+    self.safety.set_timer(10000 + 500001)
+    self.assertFalse(self._tx(self._btns(mrcc=1, ctr=4)))
+
+  def test_driver_override_then_restore_rejected(self):
+    self._open_off_window()
+    self._rx(self._btns(set_p=1, ctr=3))
+    self.assertFalse(self._tx(self._btns(mrcc=1, ctr=4)))
+
+  def test_reinit_rejects_stale_window(self):
+    self._open_off_window()
+    self.assertTrue(self._tx(self._btns(mrcc=1, ctr=4)))
+    self.safety.set_safety_hooks(CarParams.SafetyModel.mazda, MazdaSafetyFlags.TJA)
+    self.safety.init_tests()
+    self.assertFalse(self._tx(self._btns(mrcc=1, ctr=4)))
+
+  def test_ctr_15_rollover_second_ctr_rejected(self):
+    self._rx(self._crz_ctrl(False))
+    self._rx(self._btns(tja=0, ctr=14))
+    self.safety.set_timer(10000)
+    self._rx(self._btns(tja=1, ctr=15))
+    self._rx(self._btns(tja=0, ctr=15))
+    self._rx(self._crz_ctrl(True))
+    self.assertTrue(self._tx(self._btns(mrcc=1, ctr=0)))
+    self.assertFalse(self._tx(self._btns(mrcc=1, ctr=1)))
 
 
 class TestMazdaIgnition(unittest.TestCase):

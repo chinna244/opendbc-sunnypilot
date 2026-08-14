@@ -568,3 +568,48 @@ class TestRadarSessionSequencing:
     # and settles back to silenced once quiet again
     sends = self._step(cc, stock_radar_alive=False, fsc_settled=True)
     assert SESSION_PROG_DAT not in self._uds(sends)
+
+
+class TestMazdaHudUnchanged:
+  def test_create_alert_command_does_not_write_tja(self):
+    packer = CANPacker("mazda_2017")
+    parser = CANParser("mazda_2017", [("CAM_LANEINFO", 0)], 0)
+    cam_msg = {s: 0 for s in (
+      "LINE_VISIBLE", "LINE_NOT_VISIBLE", "LANE_LINES",
+      "BIT1", "BIT2", "BIT3", "NO_ERR_BIT", "S1", "S1_HBEAM",
+    )}
+    msg = mazdacan.create_alert_command(packer, cam_msg, ldw=False, steer_required=False)
+    parser.update([(0, [msg])])
+    vl = parser.vl["CAM_LANEINFO"]
+    assert vl["TJA"] == 0
+    assert vl["TJA_TRANSITION"] == 0
+
+  def test_create_alert_command_clamps_engaged_tja_when_mrcc_active(self):
+    packer = CANPacker("mazda_2017")
+    parser = CANParser("mazda_2017", [("CAM_LANEINFO", 0)], 0)
+    for st in parser.message_states.values():
+      st.ignore_checksum = True
+      st.ignore_counter = True
+      st.ignore_alive = True
+    cam_msg = {s: 0 for s in (
+      "LINE_VISIBLE", "LINE_NOT_VISIBLE", "LANE_LINES",
+      "BIT1", "BIT2", "BIT3", "NO_ERR_BIT", "S1", "S1_HBEAM",
+    )}
+    cam_msg["TJA_TRANSITION"] = 2
+    cam_msg["LANE_LINES"] = 3
+    for tja in (2, 3, 4):
+      cam_msg["TJA"] = tja
+      msg = mazdacan.create_alert_command(packer, cam_msg, False, False, mrcc_active=True)
+      parser.update([(0, [msg])])
+      vl = parser.vl["CAM_LANEINFO"]
+      assert vl["TJA"] == 0, tja
+      assert vl["TJA_TRANSITION"] == 2
+      assert vl["LANE_LINES"] == 3
+
+      msg = mazdacan.create_alert_command(packer, cam_msg, False, False, mrcc_active=False)
+      parser.update([(0, [msg])])
+      vl = parser.vl["CAM_LANEINFO"]
+      assert vl["TJA"] == tja
+      assert vl["TJA_TRANSITION"] == 2
+      assert vl["LANE_LINES"] == 3
+

@@ -3,7 +3,7 @@ import pytest
 from opendbc.car import structs
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.mazda.interface import CarInterface
-from opendbc.car.mazda.values import CAR, LKAS_LIMITS, STEER_TO_ZERO_EPS_FW
+from opendbc.car.mazda.values import CAR, LKAS_LIMITS, STEER_TO_ZERO_EPS_FW, MazdaSafetyFlags
 
 Ecu = structs.CarParams.Ecu
 
@@ -67,6 +67,8 @@ class TestMazdaEpsSwap:
     assert cx5_2022.minSteerSpeed == 0
     assert cx5_2022.steerActuatorDelay == pytest.approx(0.14)
     assert cx5_2022.alphaLongitudinalAvailable
+    assert cx5_2022.safetyConfigs[0].safetyParam & MazdaSafetyFlags.TJA
+    assert not (cx5_2022.safetyConfigs[0].safetyParam & MazdaSafetyFlags.LONG)
 
     # the CX-9 2021 is supported without the CX-5 EPS, so it keeps the 45 kph floor
     cx9_2021 = _params(CAR.MAZDA_CX9_2021)
@@ -80,3 +82,21 @@ class TestMazdaEpsSwap:
       CP = CarInterface.get_params(candidate, {0: {}, 1: {}, 2: {}}, [], False,
                                    is_release=False, docs=True)
       assert CP.dashcamOnly, candidate
+
+
+class TestMazdaTjaSafetyParam:
+  def test_tja_only_is_bit_2(self):
+    CP = _params(CAR.MAZDA_CX5_2022, alpha_long=False)
+    assert CP.safetyConfigs[0].safetyParam == MazdaSafetyFlags.TJA
+
+  def test_tja_plus_alpha_long_composes(self):
+    CP = _params(CAR.MAZDA_CX5_2022, alpha_long=True)
+    assert CP.safetyConfigs[0].safetyParam == (MazdaSafetyFlags.TJA | MazdaSafetyFlags.LONG)
+    assert CP.openpilotLongitudinalControl
+
+  def test_non_tja_mazda_has_no_tja_flag(self):
+    for candidate in (CAR.MAZDA_CX5, CAR.MAZDA_CX9, CAR.MAZDA_CX9_2021, CAR.MAZDA_3, CAR.MAZDA_6):
+      CP = _params(candidate, alpha_long=True)
+      assert not (CP.safetyConfigs[0].safetyParam & MazdaSafetyFlags.TJA), candidate
+      assert not (CP.safetyConfigs[0].safetyParam & MazdaSafetyFlags.LONG), candidate
+
