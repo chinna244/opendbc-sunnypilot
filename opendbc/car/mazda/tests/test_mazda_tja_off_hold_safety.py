@@ -14,7 +14,8 @@ from __future__ import annotations
 
 import random
 
-import pytest
+import unittest
+from opendbc.car.mazda.tests.unittest_compat import parametrize
 
 from opendbc.can import CANPacker
 from opendbc.car import structs
@@ -136,7 +137,7 @@ def _pressed_duration(rate_hz, hold_ms, wheel_phase, synth_phase, debounce_ms=ID
   }
 
 
-class TestPhysicalMrccOffHolds:
+class TestPhysicalMrccOffHolds(unittest.TestCase):
   def test_route_00000011_physical_hold_stats(self):
     holds = PHYSICAL_MRCC_OFF_HOLDS
     assert len(holds) == 22
@@ -147,17 +148,17 @@ class TestPhysicalMrccOffHolds:
     assert sorted(hold_ms)[len(hold_ms) // 2] == 190
     assert min(frames) == 2
     assert max(frames) == 5
-    for press, release, dur, n, ctrs, off_t in holds:
-      assert abs(round((release - press) * 1000) - dur) <= 1
+    for press, release, duration_ms, n, ctrs, off_t in holds:
+      assert abs(round((release - press) * 1000) - duration_ms) <= 1
       assert len(ctrs) == n
       assert off_t > press
       assert off_t < release
-      for a, b in zip(ctrs, ctrs[1:]):
+      for a, b in zip(ctrs, ctrs[1:], strict=False):
         assert b == (a + 1) % 16
 
 
-class TestRateAndDuration:
-  @pytest.mark.parametrize("rate,expect_all", [
+class TestRateAndDuration(unittest.TestCase):
+  @parametrize("rate,expect_all", [
     (10, False), (20, False), (25, False), (50, False), (100, True),
   ])
   def test_rate_vs_wheel_phase(self, rate, expect_all):
@@ -197,8 +198,8 @@ class TestRateAndDuration:
     assert TJA_OFF_COMPENSATION_MAX_TX * 10 >= 100
 
 
-@pytest.mark.parametrize("alpha_long", [False, True])
-class TestHoldStopAndAbort:
+@parametrize("alpha_long", [False, True])
+class TestHoldStopAndAbort(unittest.TestCase):
   def test_zero_tx_after_confirmed_off(self, alpha_long):
     ctrl = _controller(alpha_long)
     crz, _ = _tja_press_then_restore(ctrl, False, tja=0, available=True, enabled=False)
@@ -214,7 +215,7 @@ class TestHoldStopAndAbort:
     ctrl = _controller(alpha_long)
     _tja_press_then_restore(ctrl, False, tja=0, available=True, enabled=False)
     extra = 0
-    for i in range(2):
+    for _i in range(2):
       crz, _ = _step(ctrl, False, available=True, enabled=False, crz_btns_counter=4)
       if crz:
         extra += 1
@@ -278,8 +279,8 @@ class TestHoldStopAndAbort:
     assert len(crz) <= 1
 
 
-@pytest.mark.parametrize("alpha_long", [False, True])
-class TestGatingCasesEF:
+@parametrize("alpha_long", [False, True])
+class TestGatingCasesEF(unittest.TestCase):
   def test_case_e_zero_hold_frames(self, alpha_long):
     ctrl = _controller(alpha_long)
     crz, _ = _tja_off(ctrl, tja=1, available=True, enabled=False, pre_available=True)
@@ -319,8 +320,8 @@ class TestGatingCasesEF:
     _assert_clean_mrcc(crz)
 
 
-@pytest.mark.parametrize("alpha_long", [False, True])
-class TestCounterChecksumLateral:
+@parametrize("alpha_long", [False, True])
+class TestCounterChecksumLateral(unittest.TestCase):
   def test_hold_frames_are_clean_mrcc_across_rollover(self, alpha_long):
     ctrl = _controller(alpha_long)
     CP = ctrl.CP
@@ -360,8 +361,8 @@ class TestCounterChecksumLateral:
     assert sum(1 for s in sends if s[0] == CAM_LKAS) == 1
 
 
-@pytest.mark.parametrize("alpha_long", [False, True])
-class TestRouteCaseDReplay:
+@parametrize("alpha_long", [False, True])
+class TestRouteCaseDReplay(unittest.TestCase):
   def test_last_failed_sequence_hold_then_off(self, alpha_long):
     """TJA from OFF restores OFF; a later TJA from OFF restores again."""
     ctrl = _controller(alpha_long)
@@ -377,7 +378,7 @@ class TestRouteCaseDReplay:
     crz, _ = _start_restore_period(ctrl, False, tja=0, available=True)
     _assert_clean_mrcc(crz)
     tx += 1
-    for i in range(TJA_OFF_COMPENSATION_MAX_TX - 1):
+    for _i in range(TJA_OFF_COMPENSATION_MAX_TX - 1):
       crz, _ = _step(ctrl, False, tja=0, available=True, crz_btns_counter=4)
       _assert_clean_mrcc(crz)
       tx += 1
@@ -388,20 +389,20 @@ class TestRouteCaseDReplay:
     assert 2 < tx <= TJA_OFF_COMPENSATION_MAX_TX
 
 
-class TestRouteWheelTiming:
+class TestRouteWheelTiming(unittest.TestCase):
   def test_route_wheel_idle_100hz_beats_debounce_model(self):
     # Interval-contained 100 Hz must not treat a wheel idle as still-pressed.
     r = _pressed_duration(100, 200, wheel_phase=ROUTE_WHEEL_IDLE_MS[0], synth_phase=10)
     assert r["tx"] <= TJA_OFF_COMPENSATION_MAX_TX
 
 
-class TestTimingFuzz:
+class TestTimingFuzz(unittest.TestCase):
   def test_1e6_restore_and_negative_paths(self):
     rng = random.Random(FUZZ_SEED)
     false_hold = 0
     restore_fail = 0
     override = 0
-    for i in range(FUZZ_ITERATIONS):
+    for _i in range(FUZZ_ITERATIONS):
       kind = rng.randrange(10)
       if kind < 6:
         wp = rng.randrange(WHEEL_PERIOD_MS)
@@ -453,7 +454,7 @@ class TestTimingFuzz:
     assert override == 0
 
 
-class TestPhysicalVsSyntheticFrames:
+class TestPhysicalVsSyntheticFrames(unittest.TestCase):
   def test_old_can_off_does_not_match_physical_master_off(self):
     ctrl = _controller(False)
     packer = CANPacker("mazda_2017")
@@ -488,8 +489,7 @@ class TestPhysicalVsSyntheticFrames:
     assert crz == []
 
 
-class TestSelectedHold:
+class TestSelectedHold(unittest.TestCase):
   def test_selected_rate_and_hold_is_one_logical_press(self):
     assert TJA_OFF_COMPENSATION_MAX_TX * 10 == 100
     assert TJA_OFF_COMPENSATION_MAX_TX == 10
-

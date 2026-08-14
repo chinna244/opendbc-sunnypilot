@@ -13,7 +13,8 @@ import os
 import random
 from pathlib import Path
 
-import pytest
+import unittest
+from opendbc.car.mazda.tests.unittest_compat import parametrize
 
 from opendbc.car.mazda.carcontroller import (
   TJA_RESTORE_MRCC_MAX_TX,
@@ -21,21 +22,17 @@ from opendbc.car.mazda.carcontroller import (
 )
 from opendbc.car.mazda.mazdacan import create_alert_command
 from opendbc.car.mazda.tja_edge import MazdaTjaEdge
-from opendbc.can import CANPacker, CANParser
+from opendbc.can import CANPacker
 
 from opendbc.car.mazda.tests.test_mazda_startup_lkas import STARTUP_FRAMES, _decode_cam_lkas
 from opendbc.car.mazda.tests.test_mazda_tja_off_long import (
   CAM_LANEINFO,
   _assert_clean_mrcc,
   _controller,
-  _cs,
-  _decode_crz,
   _decode_laneinfo,
   _hud_step,
   _laneinfo_tja,
   _next_wheel_ctr,
-  _restore_armed_after_tja,
-  _restore_off_after_tja,
   _start_restore_period,
   _step,
   _tja_press,
@@ -59,8 +56,8 @@ def _load_corpus():
       with open(p) as f:
         return json.load(f), p
   raise FileNotFoundError(
-    "C4 corpus JSON missing. Extraction must complete; cannot skip the gate. "
-    f"looked={CORPUS_CANDIDATES}"
+    "C4 corpus JSON missing. Extraction must complete; cannot skip the gate. looked="
+    + str(CORPUS_CANDIDATES)
   )
 
 
@@ -155,9 +152,9 @@ def _replay_tja_event(ev, alpha_long):
     actual_mrcc = "ACTIVE"
     action = "tja_engaged_clamp" if cam_tja in (2, 3, 4) else "no_synth"
   elif pre_mrcc == "OFF" and toggle:
-    hist = ev.get("hist_post_mrcc")
+    post_mrcc = ev.get("hist_post_mrcc")
     # Real OEM TJA from OFF commonly ARMs; restore OFF. If already OFF, 0 TX.
-    if hist in (None, "ARMED", "ACTIVE"):
+    if post_mrcc in (None, "ARMED", "ACTIVE"):
       crz, _ = _tja_press(ctrl, lat, tja=1, available=False, enabled=False,
                           cam_laneinfo=cam, crz_btns_counter=kw["crz_btns_counter"])
       acc(crz)
@@ -179,8 +176,8 @@ def _replay_tja_event(ev, alpha_long):
       action = "already_off"
     actual_mrcc = "OFF"
   elif pre_mrcc == "ARMED" and toggle:
-    hist = ev.get("hist_post_mrcc")
-    if hist == "OFF":
+    post_mrcc = ev.get("hist_post_mrcc")
+    if post_mrcc == "OFF":
       crz, _ = _tja_press(ctrl, lat, tja=1, available=True, enabled=False,
                           pre_available=True, cam_laneinfo=cam,
                           crz_btns_counter=kw["crz_btns_counter"])
@@ -301,7 +298,7 @@ def _replay_long_button(ev, name, alpha_long):
   }
 
 
-class TestGeneratedFullStateSpace:
+class TestGeneratedFullStateSpace(unittest.TestCase):
   def test_reachable_combinations(self):
     failures = []
     n = 0
@@ -387,9 +384,9 @@ class TestGeneratedFullStateSpace:
     assert n >= 1000
 
 
-class TestDriverOverrideRaces:
-  @pytest.mark.parametrize("alpha_long", [False, True])
-  @pytest.mark.parametrize("btn", ["mrcc", "set_p", "set_m", "res", "cancel"])
+class TestDriverOverrideRaces(unittest.TestCase):
+  @parametrize("alpha_long", [False, True])
+  @parametrize("btn", ["mrcc", "set_p", "set_m", "res", "cancel"])
   def test_override_before_oem_side_effect(self, alpha_long, btn):
     """Driver long input while still OFF aborts; later OEM ARM must not restore."""
     fails = 0
@@ -417,8 +414,8 @@ class TestDriverOverrideRaces:
     assert fails == 0
     assert restore_after == 0
 
-  @pytest.mark.parametrize("alpha_long", [False, True])
-  @pytest.mark.parametrize("btn", ["set_p", "set_m", "res", "cancel"])
+  @parametrize("alpha_long", [False, True])
+  @parametrize("btn", ["set_p", "set_m", "res", "cancel"])
   def test_set_res_cancel_abort_inflight_restore(self, alpha_long, btn):
     fails = 0
     restore_after = 0
@@ -443,7 +440,7 @@ class TestDriverOverrideRaces:
     assert fails == 0
     assert restore_after == 0
 
-  @pytest.mark.parametrize("alpha_long", [False, True])
+  @parametrize("alpha_long", [False, True])
   def test_new_tja_aborts_stale_restore(self, alpha_long):
     stale = 0
     for delay_ms in OVERRIDE_DELAYS_MS:
@@ -462,7 +459,7 @@ class TestDriverOverrideRaces:
         stale += 1
     assert stale == 0
 
-  @pytest.mark.parametrize("alpha_long", [False, True])
+  @parametrize("alpha_long", [False, True])
   def test_brake_during_pending_restore(self, alpha_long):
     fails = 0
     for delay_ms in OVERRIDE_DELAYS_MS:
@@ -483,8 +480,8 @@ class TestDriverOverrideRaces:
     assert fails == 0
 
 
-class TestCrzCounterPhase:
-  @pytest.mark.parametrize("alpha_long", [False, True])
+class TestCrzCounterPhase(unittest.TestCase):
+  @parametrize("alpha_long", [False, True])
   def test_all_counters_and_rollover(self, alpha_long):
     fails = 0
     collisions = 0
@@ -557,8 +554,8 @@ class TestCrzCounterPhase:
     assert multigesture == 0
 
 
-class TestCamLaneinfoExhaustive:
-  @pytest.mark.parametrize("alpha_long", [False, True])
+class TestCamLaneinfoExhaustive(unittest.TestCase):
+  @parametrize("alpha_long", [False, True])
   def test_tja_values_vs_mrcc(self, alpha_long):
     invalid = 0
     tja2_active = 0
@@ -594,8 +591,8 @@ class TestCamLaneinfoExhaustive:
     assert invalid == 0
 
 
-class TestRestartReinit:
-  @pytest.mark.parametrize("alpha_long", [False, True])
+class TestRestartReinit(unittest.TestCase):
+  @parametrize("alpha_long", [False, True])
   def test_new_controller_has_no_stale_restore(self, alpha_long):
     stale = 0
     synth = 0
@@ -622,7 +619,7 @@ class TestRestartReinit:
     assert e.update(True) is True
 
 
-class TestCorpusReplay:
+class TestCorpusReplay(unittest.TestCase):
   def test_every_c4_route_event(self):
     corpus, path = _load_corpus()
     assert corpus.get("unreadable_count", 0) == 0, corpus.get("unreadable")
@@ -672,7 +669,7 @@ class TestCorpusReplay:
       # older C4 builds (e.g. 00000014 FSC latch). Score startup against the
       # current candidate, not the recorded TX.
       ctrl = _controller(alpha)
-      for i in range(min(STARTUP_FRAMES, 80)):
+      for _i in range(min(STARTUP_FRAMES, 80)):
         crz, sends = _step(ctrl, False)
         cam = _decode_cam_lkas(sends)
         if crz:
@@ -787,19 +784,18 @@ class TestCorpusReplay:
     out = "/tmp/mazda_c4_gate_report.json"
     with open(out, "w") as f:
       json.dump(report, f)
-    Path("/tmp/mazda_c4_gate_scorecard.txt").write_text(
-      "\n".join(
-        f"ROUTE={s['route']} TJA_EVENTS={s['tja']} MRCC_EVENTS={s['mrcc']} "
-        f"SET_PLUS_EVENTS={s['set_p']} SET_MINUS_EVENTS={s['set_m']} "
-        f"RES_EVENTS={s['res']} CANCEL_EVENTS={s['cancel']} "
-        f"OFF_CASES={s['off']} ARMED_CASES={s['armed']} ACTIVE_CASES={s['active']} "
-        f"UNKNOWN_CASES={s['unknown']} MADS_ERRORS={s['mads_err']} "
-        f"MRCC_FINAL_STATE_ERRORS={s['mrcc_err']} "
-        f"BUTTON_INDEPENDENCE_ERRORS={s['btn_err']} STARTUP_ERRORS={s['startup_err']} "
-        f"PANDA_ERRORS={s['panda_err']} RESULT={s['result']}"
-        for s in scorecard
-      ) + "\n"
-    )
+    lines = []
+    for s in scorecard:
+      line = (
+        "ROUTE={route} TJA_EVENTS={tja} MRCC_EVENTS={mrcc} SET_PLUS_EVENTS={set_p} "
+        + "SET_MINUS_EVENTS={set_m} RES_EVENTS={res} CANCEL_EVENTS={cancel} "
+        + "OFF_CASES={off} ARMED_CASES={armed} ACTIVE_CASES={active} "
+        + "UNKNOWN_CASES={unknown} MADS_ERRORS={mads_err} "
+        + "MRCC_FINAL_STATE_ERRORS={mrcc_err} BUTTON_INDEPENDENCE_ERRORS={btn_err} "
+        + "STARTUP_ERRORS={startup_err} PANDA_ERRORS={panda_err} RESULT={result}"
+      ).format(**s)
+      lines.append(line)
+    Path("/tmp/mazda_c4_gate_scorecard.txt").write_text("\n".join(lines) + "\n")
     assert tja_edges == toggles
     assert zero_toggle == 0
     assert double_toggle == 0
@@ -816,193 +812,194 @@ class TestCorpusReplay:
     assert all(s["result"] == "PASS" for s in scorecard)
 
 
-def test_gate_fuzz_5m():
-  rng = random.Random(GATE_FUZZ_SEED)
-  false_off = unknown_restore = pre_armed_cancel = pre_active_cancel = 0
-  driver_owned_cancel = mrcc_mads = set_plus_mads = set_minus_mads = 0
-  res_mads = cancel_mads = unbounded = panda_reject = 0
-  stale_after_restart = synth_after_reinit = 0
-  active_tja2_tx = 0
-  mads_parity = 0
+class TestMazdaC4ValidationGate(unittest.TestCase):
+  def test_gate_fuzz_5m(self):
+    rng = random.Random(GATE_FUZZ_SEED)
+    false_off = unknown_restore = pre_armed_cancel = pre_active_cancel = 0
+    driver_owned_cancel = mrcc_mads = set_plus_mads = set_minus_mads = 0
+    res_mads = cancel_mads = unbounded = panda_reject = 0
+    stale_after_restart = synth_after_reinit = 0
+    active_tja2_tx = 0
+    mads_parity = 0
 
-  park_nonzero = wrong_gear_steer = 0
+    park_nonzero = wrong_gear_steer = 0
 
-  def do_step(ctrl, lat, gear="drive", park_brake=False, **kw):
-    nonlocal active_tja2_tx, park_nonzero, wrong_gear_steer
-    cam = dict(CAM_LANEINFO)
-    cam["TJA"] = rng.choice([0, 1, 2, 3])
-    cam["TJA_TRANSITION"] = rng.choice([0, 2])
-    kw.setdefault("cam_laneinfo", cam)
-    if rng.randrange(8) == 0:
-      ctrl.frame = 50
-    if _gear_blocks_lat(gear, park_brake) and lat:
-      if gear == "park":
-        park_nonzero += 1
-      else:
-        wrong_gear_steer += 1
-      lat = False
-    crz, sends = _step(ctrl, lat, **kw)
-    if kw.get("enabled"):
-      for li in _decode_laneinfo(sends):
-        if li["TJA"] in (2, 3, 4):
-          active_tja2_tx += 1
-    return crz
+    def do_step(ctrl, lat, gear="drive", park_brake=False, **kw):
+      nonlocal active_tja2_tx, park_nonzero, wrong_gear_steer
+      cam = dict(CAM_LANEINFO)
+      cam["TJA"] = rng.choice([0, 1, 2, 3])
+      cam["TJA_TRANSITION"] = rng.choice([0, 2])
+      kw.setdefault("cam_laneinfo", cam)
+      if rng.randrange(8) == 0:
+        ctrl.frame = 50
+      if _gear_blocks_lat(gear, park_brake) and lat:
+        if gear == "park":
+          park_nonzero += 1
+        else:
+          wrong_gear_steer += 1
+        lat = False
+      crz, sends = _step(ctrl, lat, **kw)
+      if kw.get("enabled"):
+        for li in _decode_laneinfo(sends):
+          if li["TJA"] in (2, 3, 4):
+            active_tja2_tx += 1
+      return crz
 
-  ctrl = _controller(False)
-  mads = False
-  mrcc = "OFF"
-  tja_held = False
-  pending_arm_delay = pending_disarm_delay = -1
-  last_tja_unconfirmed = False
-  driver_took = False
-  wheel_ctr = 3
-  gear = "drive"
-  park_brake = False
+    ctrl = _controller(False)
+    mads = False
+    mrcc = "OFF"
+    tja_held = False
+    pending_arm_delay = pending_disarm_delay = -1
+    last_tja_unconfirmed = False
+    driver_took = False
+    wheel_ctr = 3
+    gear = "drive"
+    park_brake = False
 
-  def snapshot_kw():
-    if mrcc == "UNKNOWN":
-      return {"pre_unknown": True, "pre_available": False, "pre_enabled": False,
-              "available": False, "enabled": False}
-    return {
-      "pre_unknown": last_tja_unconfirmed,
-      "pre_available": mrcc in ("ARMED", "ACTIVE"),
-      "pre_enabled": mrcc == "ACTIVE",
-      "available": mrcc in ("ARMED", "ACTIVE"),
-      "enabled": mrcc == "ACTIVE",
-    }
+    def snapshot_kw():
+      if mrcc == "UNKNOWN":
+        return {"pre_unknown": True, "pre_available": False, "pre_enabled": False,
+                "available": False, "enabled": False}
+      return {
+        "pre_unknown": last_tja_unconfirmed,
+        "pre_available": mrcc in ("ARMED", "ACTIVE"),
+        "pre_enabled": mrcc == "ACTIVE",
+        "available": mrcc in ("ARMED", "ACTIVE"),
+        "enabled": mrcc == "ACTIVE",
+      }
 
-  for i in range(GATE_FUZZ_ITERATIONS):
-    if i % 2 == 1:
-      # second half uses Alpha Long ON controller periodically
-      pass
-    gear = rng.choice(("park", "reverse", "neutral", "drive"))
-    park_brake = bool(rng.getrandbits(1))
-    lat = _lat_for_enabled(mads, gear, park_brake)
-    ev = rng.randrange(16)
-    if ev == 15:
-      ctrl = _controller(rng.choice([False, True]))
-      crz = do_step(ctrl, lat, gear=gear, park_brake=park_brake,
-                    available=(mrcc in ("ARMED", "ACTIVE")),
-                    enabled=(mrcc == "ACTIVE"))
-      if crz:
-        stale_after_restart += 1
-        synth_after_reinit += 1
-      mads = False
-      mrcc = "OFF"
-      tja_held = False
-      pending_arm_delay = pending_disarm_delay = -1
-      last_tja_unconfirmed = False
-      driver_took = False
-      continue
-    kw = snapshot_kw()
-    long_kw = {**kw, "cc_enabled": mrcc == "ACTIVE", "long_active": mrcc == "ACTIVE",
-               "crz_btns_counter": wheel_ctr}
-    if i % 10 == 0:
-      wheel_ctr = (wheel_ctr + 1) & 0xF
-    if ev == 0:
-      mads = not mads
-      tja_held = True
-      snap = mrcc
+    for i in range(GATE_FUZZ_ITERATIONS):
+      if i % 2 == 1:
+        # second half uses Alpha Long ON controller periodically
+        pass
+      gear = rng.choice(("park", "reverse", "neutral", "drive"))
+      park_brake = bool(rng.getrandbits(1))
       lat = _lat_for_enabled(mads, gear, park_brake)
-      crz = do_step(ctrl, lat, gear=gear, park_brake=park_brake, toggles=1, tja=1, **long_kw)
-      if kw["pre_unknown"] and (crz or ctrl._tja_restore_mrcc_off_pending):
-        unknown_restore += 1
-      if snap == "ARMED" and crz:
-        pre_armed_cancel += 1
-      if snap == "ACTIVE" and crz:
-        pre_active_cancel += 1
-      if mrcc == "OFF" and not kw["pre_unknown"]:
-        pending_arm_delay = rng.randrange(4)
-        pending_disarm_delay = -1
-      elif mrcc == "ARMED" and not kw["pre_unknown"]:
-        pending_disarm_delay = rng.randrange(4)
-        pending_arm_delay = -1
-      else:
-        pending_arm_delay = pending_disarm_delay = -1
-      last_tja_unconfirmed = False
-      driver_took = False
-      if ctrl._tja_off_comp_tx > TJA_RESTORE_MRCC_MAX_TX:
-        unbounded += 1
-    elif ev == 1:
-      tja_held = False
-      crz = do_step(ctrl, lat, gear=gear, park_brake=park_brake, tja=0, **long_kw)
-      if ctrl._tja_off_comp_tx > TJA_RESTORE_MRCC_MAX_TX:
-        unbounded += 1
-    elif ev == 2:
-      crz = do_step(ctrl, lat, gear=gear, park_brake=park_brake, mrcc=1, **long_kw)
-      mrcc_mads += sum(1 for f in crz if f["TJA"])
-      mrcc = "OFF" if mrcc != "OFF" else "ARMED"
-      last_tja_unconfirmed = False
-      driver_took = True
-      pending_arm_delay = pending_disarm_delay = -1
-    elif ev in (3, 4):
-      extra = {"set_p": 1} if ev == 3 else {"set_m": 1}
-      crz = do_step(ctrl, lat, gear=gear, park_brake=park_brake, **long_kw, **extra)
-      if ev == 3:
-        set_plus_mads += sum(1 for f in crz if f["TJA"])
-      else:
-        set_minus_mads += sum(1 for f in crz if f["TJA"])
-      if mrcc == "ARMED":
-        mrcc = "ACTIVE"
-      driver_took = True
-      last_tja_unconfirmed = False
-      pending_arm_delay = pending_disarm_delay = -1
-    elif ev == 5:
-      crz = do_step(ctrl, lat, gear=gear, park_brake=park_brake, res=1, **long_kw)
-      res_mads += sum(1 for f in crz if f["TJA"])
-      driver_took = True
-      last_tja_unconfirmed = False
-      pending_arm_delay = pending_disarm_delay = -1
-    elif ev == 6:
-      crz = do_step(ctrl, lat, gear=gear, park_brake=park_brake, cancel=1, **long_kw)
-      cancel_mads += sum(1 for f in crz if f["TJA"])
-      driver_took = True
-      last_tja_unconfirmed = False
-      pending_arm_delay = pending_disarm_delay = -1
-    elif ev == 7:
-      mrcc = "UNKNOWN"
-      last_tja_unconfirmed = True
-      crz = do_step(ctrl, lat, gear=gear, park_brake=park_brake, pre_unknown=True, available=False, enabled=False)
-    else:
-      if pending_arm_delay == 0 and mrcc == "OFF" and not driver_took:
-        mrcc = "ARMED"
-        last_tja_unconfirmed = False
-        pending_arm_delay = -1
-      elif pending_disarm_delay == 0 and mrcc == "ARMED" and not driver_took:
+      ev = rng.randrange(16)
+      if ev == 15:
+        ctrl = _controller(rng.choice([False, True]))
+        crz = do_step(ctrl, lat, gear=gear, park_brake=park_brake,
+                      available=(mrcc in ("ARMED", "ACTIVE")),
+                      enabled=(mrcc == "ACTIVE"))
+        if crz:
+          stale_after_restart += 1
+          synth_after_reinit += 1
+        mads = False
         mrcc = "OFF"
+        tja_held = False
+        pending_arm_delay = pending_disarm_delay = -1
         last_tja_unconfirmed = False
-        pending_disarm_delay = -1
-      elif pending_arm_delay > 0:
-        pending_arm_delay -= 1
-      elif pending_disarm_delay > 0:
-        pending_disarm_delay -= 1
-      crz = do_step(ctrl, lat, gear=gear, park_brake=park_brake, tja=int(tja_held),
-                    available=(mrcc in ("ARMED", "ACTIVE")),
-                    enabled=(mrcc == "ACTIVE"),
-                    cc_enabled=(mrcc == "ACTIVE"),
-                    long_active=(mrcc == "ACTIVE"),
-                    pre_unknown=(mrcc == "UNKNOWN"))
-      if crz and not tja_held and not driver_took and not last_tja_unconfirmed:
-        if mrcc == "OFF":
+        driver_took = False
+        continue
+      kw = snapshot_kw()
+      long_kw = {**kw, "cc_enabled": mrcc == "ACTIVE", "long_active": mrcc == "ACTIVE",
+                 "crz_btns_counter": wheel_ctr}
+      if i % 10 == 0:
+        wheel_ctr = (wheel_ctr + 1) & 0xF
+      if ev == 0:
+        mads = not mads
+        tja_held = True
+        snap = mrcc
+        lat = _lat_for_enabled(mads, gear, park_brake)
+        crz = do_step(ctrl, lat, gear=gear, park_brake=park_brake, toggles=1, tja=1, **long_kw)
+        if kw["pre_unknown"] and (crz or ctrl._tja_restore_mrcc_off_pending):
+          unknown_restore += 1
+        if snap == "ARMED" and crz:
+          pre_armed_cancel += 1
+        if snap == "ACTIVE" and crz:
+          pre_active_cancel += 1
+        if mrcc == "OFF" and not kw["pre_unknown"]:
+          pending_arm_delay = rng.randrange(4)
+          pending_disarm_delay = -1
+        elif mrcc == "ARMED" and not kw["pre_unknown"]:
+          pending_disarm_delay = rng.randrange(4)
+          pending_arm_delay = -1
+        else:
+          pending_arm_delay = pending_disarm_delay = -1
+        last_tja_unconfirmed = False
+        driver_took = False
+        if ctrl._tja_off_comp_tx > TJA_RESTORE_MRCC_MAX_TX:
+          unbounded += 1
+      elif ev == 1:
+        tja_held = False
+        crz = do_step(ctrl, lat, gear=gear, park_brake=park_brake, tja=0, **long_kw)
+        if ctrl._tja_off_comp_tx > TJA_RESTORE_MRCC_MAX_TX:
+          unbounded += 1
+      elif ev == 2:
+        crz = do_step(ctrl, lat, gear=gear, park_brake=park_brake, mrcc=1, **long_kw)
+        mrcc_mads += sum(1 for f in crz if f["TJA"])
+        mrcc = "OFF" if mrcc != "OFF" else "ARMED"
+        last_tja_unconfirmed = False
+        driver_took = True
+        pending_arm_delay = pending_disarm_delay = -1
+      elif ev in (3, 4):
+        extra = {"set_p": 1} if ev == 3 else {"set_m": 1}
+        crz = do_step(ctrl, lat, gear=gear, park_brake=park_brake, **long_kw, **extra)
+        if ev == 3:
+          set_plus_mads += sum(1 for f in crz if f["TJA"])
+        else:
+          set_minus_mads += sum(1 for f in crz if f["TJA"])
+        if mrcc == "ARMED":
+          mrcc = "ACTIVE"
+        driver_took = True
+        last_tja_unconfirmed = False
+        pending_arm_delay = pending_disarm_delay = -1
+      elif ev == 5:
+        crz = do_step(ctrl, lat, gear=gear, park_brake=park_brake, res=1, **long_kw)
+        res_mads += sum(1 for f in crz if f["TJA"])
+        driver_took = True
+        last_tja_unconfirmed = False
+        pending_arm_delay = pending_disarm_delay = -1
+      elif ev == 6:
+        crz = do_step(ctrl, lat, gear=gear, park_brake=park_brake, cancel=1, **long_kw)
+        cancel_mads += sum(1 for f in crz if f["TJA"])
+        driver_took = True
+        last_tja_unconfirmed = False
+        pending_arm_delay = pending_disarm_delay = -1
+      elif ev == 7:
+        mrcc = "UNKNOWN"
+        last_tja_unconfirmed = True
+        crz = do_step(ctrl, lat, gear=gear, park_brake=park_brake, pre_unknown=True, available=False, enabled=False)
+      else:
+        if pending_arm_delay == 0 and mrcc == "OFF" and not driver_took:
           mrcc = "ARMED"
-        elif mrcc == "ARMED":
+          last_tja_unconfirmed = False
+          pending_arm_delay = -1
+        elif pending_disarm_delay == 0 and mrcc == "ARMED" and not driver_took:
           mrcc = "OFF"
-      if crz and mrcc == "ACTIVE":
-        pre_active_cancel += 1
-      if ctrl._tja_off_comp_tx > TJA_RESTORE_MRCC_MAX_TX:
-        unbounded += 1
+          last_tja_unconfirmed = False
+          pending_disarm_delay = -1
+        elif pending_arm_delay > 0:
+          pending_arm_delay -= 1
+        elif pending_disarm_delay > 0:
+          pending_disarm_delay -= 1
+        crz = do_step(ctrl, lat, gear=gear, park_brake=park_brake, tja=int(tja_held),
+                      available=(mrcc in ("ARMED", "ACTIVE")),
+                      enabled=(mrcc == "ACTIVE"),
+                      cc_enabled=(mrcc == "ACTIVE"),
+                      long_active=(mrcc == "ACTIVE"),
+                      pre_unknown=(mrcc == "UNKNOWN"))
+        if crz and not tja_held and not driver_took and not last_tja_unconfirmed:
+          if mrcc == "OFF":
+            mrcc = "ARMED"
+          elif mrcc == "ARMED":
+            mrcc = "OFF"
+        if crz and mrcc == "ACTIVE":
+          pre_active_cancel += 1
+        if ctrl._tja_off_comp_tx > TJA_RESTORE_MRCC_MAX_TX:
+          unbounded += 1
 
-  assert false_off == 0
-  assert unknown_restore == 0
-  assert pre_armed_cancel == 0
-  assert pre_active_cancel == 0
-  assert driver_owned_cancel == 0
-  assert mrcc_mads == set_plus_mads == set_minus_mads == res_mads == cancel_mads == 0
-  assert unbounded == 0
-  assert panda_reject == 0
-  assert stale_after_restart == 0
-  assert synth_after_reinit == 0
-  assert active_tja2_tx == 0
-  assert mads_parity == 0
-  assert park_nonzero == 0
-  assert wrong_gear_steer == 0
+    assert false_off == 0
+    assert unknown_restore == 0
+    assert pre_armed_cancel == 0
+    assert pre_active_cancel == 0
+    assert driver_owned_cancel == 0
+    assert mrcc_mads == set_plus_mads == set_minus_mads == res_mads == cancel_mads == 0
+    assert unbounded == 0
+    assert panda_reject == 0
+    assert stale_after_restart == 0
+    assert synth_after_reinit == 0
+    assert active_tja2_tx == 0
+    assert mads_parity == 0
+    assert park_nonzero == 0
+    assert wrong_gear_steer == 0

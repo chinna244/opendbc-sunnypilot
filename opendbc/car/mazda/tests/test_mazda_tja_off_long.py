@@ -19,7 +19,8 @@ CAN_OFF is not the 2025 CX-5 master cruise control.
 from types import SimpleNamespace
 import random
 
-import pytest
+import unittest
+from opendbc.car.mazda.tests.unittest_compat import parametrize
 
 from opendbc.can import CANParser
 from opendbc.car import Bus, structs
@@ -228,8 +229,8 @@ def _restore_armed_after_tja(ctrl, lat_after, **kw):
   return ctrl
 
 
-@pytest.mark.parametrize("alpha_long", [False, True])
-class TestTjaMadsOnlyIndependence:
+@parametrize("alpha_long", [False, True])
+class TestTjaMadsOnlyIndependence(unittest.TestCase):
   def test_sequence_1_mads_on_from_mrcc_off_restores_off(self, alpha_long):
     ctrl = _controller(alpha_long)
     _restore_off_after_tja(ctrl, True)
@@ -585,7 +586,7 @@ class TestTjaMadsOnlyIndependence:
 
   def test_route_00000018_all_32_tja_final_state(self, alpha_long):
     """Replay every physical TJA on ff7df7d6f9c3403b|00000018--f0206780a5."""
-    # (id, pre, post_physical_TJA). Restore iff those differ and pre is OFF/ARMED.
+    # (id, pre, post_physical_TJA). Restore if and only if those differ and pre is OFF/ARMED.
     events = (
       (1, "OFF", "ARMED"), (2, "OFF", "ARMED"), (3, "ARMED", "OFF"),
       (4, "OFF", "ARMED"), (5, "OFF", "ARMED"), (6, "ARMED", "OFF"),
@@ -656,7 +657,7 @@ class TestTjaMadsOnlyIndependence:
       assert li[0]["TJA"] == 2
       assert li[0]["TJA_TRANSITION"] == 2
 
-  @pytest.mark.parametrize("tja", [0, 1])
+  @parametrize("tja", [0, 1])
   def test_hud_non_engaged_tja_passthrough_while_active(self, alpha_long, tja):
     ctrl = _controller(alpha_long)
     crz, sends = _hud_step(ctrl, True, available=True, enabled=True,
@@ -667,9 +668,9 @@ class TestTjaMadsOnlyIndependence:
     assert len(li) == 1
     assert li[0]["TJA"] == tja
 
-  @pytest.mark.parametrize("tja", [2, 3, 4])
+  @parametrize("tja", [2, 3, 4])
   def test_hud_engaged_tja_clamped_while_mrcc_active(self, alpha_long, tja):
-    """Functional MRCC preservation: TJA 2/3/4 while ACTIVE cancelled cruise.
+    """Functional MRCC preservation: TJA 2/3/4 while ACTIVE canceled cruise.
 
     Route 00000019 events 24/40/43/46 packed TJA=3, not TJA=2. Event 28 kept
     ACTIVE with TJA=0. Do not rewrite TJA_TRANSITION.
@@ -796,7 +797,7 @@ class TestTjaMadsOnlyIndependence:
     )
     assert len(events) == 53
     fails = []
-    for eid, button, pre_mads, pre_mrcc, cam_tja, hist in events:
+    for eid, button, pre_mads, pre_mrcc, cam_tja, post_mrcc in events:
       ctrl = _controller(alpha_long)
       cam = _laneinfo_tja(cam_tja, 2 if cam_tja else 0)
       expected_mads = (not pre_mads) if button == "TJA" else pre_mads
@@ -804,8 +805,8 @@ class TestTjaMadsOnlyIndependence:
         expected_mrcc = pre_mrcc
         pre_av = pre_mrcc in ("ARMED", "ACTIVE")
         pre_en = pre_mrcc == "ACTIVE"
-        hist_av = hist in ("ARMED", "ACTIVE")
-        hist_en = hist == "ACTIVE"
+        hist_av = post_mrcc in ("ARMED", "ACTIVE")
+        hist_en = post_mrcc == "ACTIVE"
         crz, sends = _hud_step(ctrl, expected_mads, available=pre_av, enabled=pre_en,
                                pre_available=pre_av, pre_enabled=pre_en,
                                cc_enabled=pre_en, long_active=pre_en, cam_laneinfo=cam)
@@ -819,7 +820,7 @@ class TestTjaMadsOnlyIndependence:
           fails.append((eid, "synth_while_held", crz))
         crz, _ = _step(ctrl, expected_mads, tja=0, available=hist_av, enabled=hist_en,
                        cam_laneinfo=cam, crz_btns_counter=3)
-        need = pre_mrcc in ("OFF", "ARMED") and hist != pre_mrcc
+        need = pre_mrcc in ("OFF", "ARMED") and post_mrcc != pre_mrcc
         if pre_mrcc == "ACTIVE":
           if crz:
             fails.append((eid, "active_synth", crz))
@@ -904,222 +905,223 @@ def _crz_tja_count(crz):
   return sum(1 for f in crz if f["TJA"])
 
 
-def test_tja_restore_timing_fuzz():
-  rng = random.Random(RESTORE_FUZZ_SEED)
-  false_off = unknown_restore = pre_armed_cancel = pre_active_cancel = 0
-  driver_owned_cancel = mrcc_mads = set_plus_mads = set_minus_mads = 0
-  res_mads = cancel_mads = unbounded = panda_reject = 0
-  stale_after_restart = synth_after_reinit = 0
-  active_tja2_tx = active_0820_latch = 0
+class TestMazdaTjaOffLong(unittest.TestCase):
+  def test_tja_restore_timing_fuzz(self):
+    rng = random.Random(RESTORE_FUZZ_SEED)
+    false_off = unknown_restore = pre_armed_cancel = pre_active_cancel = 0
+    driver_owned_cancel = mrcc_mads = set_plus_mads = set_minus_mads = 0
+    res_mads = cancel_mads = unbounded = panda_reject = 0
+    stale_after_restart = synth_after_reinit = 0
+    active_tja2_tx = active_0820_latch = 0
 
-  def do_step(ctrl, lat, **kw):
-    nonlocal active_tja2_tx, active_0820_latch
-    cam = dict(CAM_LANEINFO)
-    cam["TJA"] = rng.choice([0, 1, 2, 3])
-    cam["TJA_TRANSITION"] = rng.choice([0, 2])
-    kw.setdefault("cam_laneinfo", cam)
-    if rng.randrange(8) == 0:
-      ctrl.frame = 50
-    crz, sends = _step(ctrl, lat, **kw)
-    if kw.get("enabled"):
-      for li in _decode_laneinfo(sends):
-        if li["TJA"] in (2, 3, 4):
-          active_tja2_tx += 1
-          active_0820_latch += 1
-    return crz
+    def do_step(ctrl, lat, **kw):
+      nonlocal active_tja2_tx, active_0820_latch
+      cam = dict(CAM_LANEINFO)
+      cam["TJA"] = rng.choice([0, 1, 2, 3])
+      cam["TJA_TRANSITION"] = rng.choice([0, 2])
+      kw.setdefault("cam_laneinfo", cam)
+      if rng.randrange(8) == 0:
+        ctrl.frame = 50
+      crz, sends = _step(ctrl, lat, **kw)
+      if kw.get("enabled"):
+        for li in _decode_laneinfo(sends):
+          if li["TJA"] in (2, 3, 4):
+            active_tja2_tx += 1
+            active_0820_latch += 1
+      return crz
 
-  def do_tja_press(ctrl, lat_after, **kw):
-    return do_step(ctrl, lat_after, toggles=1, **kw)
+    def do_tja_press(ctrl, lat_after, **kw):
+      return do_step(ctrl, lat_after, toggles=1, **kw)
 
-  ctrl = _controller(False)
-  mads = False
-  mrcc = "OFF"  # OFF / ARMED / ACTIVE / UNKNOWN
-  tja_held = False
-  pending_arm_delay = -1
-  pending_disarm_delay = -1
-  last_tja_unconfirmed = False
-  driver_took = False
-  wheel_ctr = 3
+    ctrl = _controller(False)
+    mads = False
+    mrcc = "OFF"  # OFF / ARMED / ACTIVE / UNKNOWN
+    tja_held = False
+    pending_arm_delay = -1
+    pending_disarm_delay = -1
+    last_tja_unconfirmed = False
+    driver_took = False
+    wheel_ctr = 3
 
-  def snapshot_kw():
-    if mrcc == "UNKNOWN":
-      return {"pre_unknown": True, "pre_available": False, "pre_enabled": False,
-              "available": False, "enabled": False}
-    return {
-      "pre_unknown": last_tja_unconfirmed,
-      "pre_available": mrcc in ("ARMED", "ACTIVE"),
-      "pre_enabled": mrcc == "ACTIVE",
-      "available": mrcc in ("ARMED", "ACTIVE"),
-      "enabled": mrcc == "ACTIVE",
-    }
+    def snapshot_kw():
+      if mrcc == "UNKNOWN":
+        return {"pre_unknown": True, "pre_available": False, "pre_enabled": False,
+                "available": False, "enabled": False}
+      return {
+        "pre_unknown": last_tja_unconfirmed,
+        "pre_available": mrcc in ("ARMED", "ACTIVE"),
+        "pre_enabled": mrcc == "ACTIVE",
+        "available": mrcc in ("ARMED", "ACTIVE"),
+        "enabled": mrcc == "ACTIVE",
+      }
 
-  for _ in range(RESTORE_FUZZ_ITERATIONS):
-    ev = rng.randrange(16)
-    if ev == 15:
-      ctrl = _controller(False)
-      crz = do_step(ctrl, mads, available=(mrcc in ("ARMED", "ACTIVE")),
-                    enabled=(mrcc == "ACTIVE"))
-      if crz:
-        stale_after_restart += 1
-        synth_after_reinit += 1
-      mads = False
-      mrcc = "OFF"
-      tja_held = False
-      pending_arm_delay = -1
-      pending_disarm_delay = -1
-      last_tja_unconfirmed = False
-      driver_took = False
-      continue
-
-    kw = snapshot_kw()
-    long_kw = {**kw, "cc_enabled": mrcc == "ACTIVE", "long_active": mrcc == "ACTIVE",
-               "crz_btns_counter": wheel_ctr}
-    if _ % 10 == 0:
-      wheel_ctr = (wheel_ctr + 1) & 0xF
-
-    if ev == 0:
-      classified_off = (not kw["pre_unknown"] and not kw["pre_available"] and not kw["pre_enabled"])
-      actual_off = mrcc == "OFF"
-      if classified_off and not actual_off and not last_tja_unconfirmed:
-        false_off += 1
-      mads = not mads
-      tja_held = True
-      snap = mrcc
-      crz = do_tja_press(ctrl, mads, tja=1, **long_kw)
-      if kw["pre_unknown"] and (crz or ctrl._tja_restore_mrcc_off_pending):
-        unknown_restore += 1
-      if snap == "ARMED" and crz:
-        pre_armed_cancel += 1
-      if snap == "ACTIVE" and crz:
-        pre_active_cancel += 1
-      if driver_took and snap in ("ARMED", "ACTIVE") and crz:
-        driver_owned_cancel += 1
-      if mrcc == "OFF" and not kw["pre_unknown"]:
-        pending_arm_delay = rng.randrange(4)  # 0–3 cycle delay
-        pending_disarm_delay = -1
-      elif mrcc == "ARMED" and not kw["pre_unknown"]:
-        pending_disarm_delay = rng.randrange(4)
-        pending_arm_delay = -1
-      else:
-        pending_arm_delay = -1
-        pending_disarm_delay = -1
-      last_tja_unconfirmed = False
-      driver_took = False
-      if ctrl._tja_off_comp_tx > TJA_RESTORE_MRCC_MAX_TX:
-        unbounded += 1
-      for f in crz:
-        if f["TJA"] or f["CAN_OFF"] or f["SET_P"] or f["SET_M"] or f["RES"]:
-          panda_reject += 1
-    elif ev == 1:
-      tja_held = False
-      crz = do_step(ctrl, mads, tja=0, **long_kw)
-      if ctrl._tja_off_comp_tx > TJA_RESTORE_MRCC_MAX_TX:
-        unbounded += 1
-      for f in crz:
-        if f["TJA"] or f["CAN_OFF"] or f["SET_P"] or f["SET_M"] or f["RES"]:
-          panda_reject += 1
-    elif ev == 2:
-      crz = do_step(ctrl, mads, mrcc=1, **long_kw)
-      mrcc_mads += _crz_tja_count(crz)
-      if ctrl._tja_off_comp_tx > TJA_RESTORE_MRCC_MAX_TX:
-        unbounded += 1
-      mrcc = "OFF" if mrcc != "OFF" else "ARMED"
-      last_tja_unconfirmed = False
-      driver_took = True
-      pending_arm_delay = -1
-      pending_disarm_delay = -1
-    elif ev in (3, 4):
-      extra = {"set_p": 1} if ev == 3 else {"set_m": 1}
-      crz = do_step(ctrl, mads, **long_kw, **extra)
-      if ev == 3:
-        set_plus_mads += _crz_tja_count(crz)
-      else:
-        set_minus_mads += _crz_tja_count(crz)
-      if ctrl._tja_off_comp_tx > TJA_RESTORE_MRCC_MAX_TX:
-        unbounded += 1
-      if mrcc == "ARMED":
-        mrcc = "ACTIVE"
-      driver_took = True
-      last_tja_unconfirmed = False
-      pending_arm_delay = -1
-      pending_disarm_delay = -1
-    elif ev == 5:
-      crz = do_step(ctrl, mads, res=1, **long_kw)
-      res_mads += _crz_tja_count(crz)
-      if ctrl._tja_off_comp_tx > TJA_RESTORE_MRCC_MAX_TX:
-        unbounded += 1
-      driver_took = True
-      last_tja_unconfirmed = False
-      pending_arm_delay = -1
-      pending_disarm_delay = -1
-    elif ev == 6:
-      crz = do_step(ctrl, mads, cancel=1, **long_kw)
-      cancel_mads += _crz_tja_count(crz)
-      if ctrl._tja_off_comp_tx > TJA_RESTORE_MRCC_MAX_TX:
-        unbounded += 1
-      driver_took = True
-      last_tja_unconfirmed = False
-      pending_arm_delay = -1
-      pending_disarm_delay = -1
-    elif ev == 7:
-      mrcc = "UNKNOWN"
-      last_tja_unconfirmed = True
-      crz = do_step(ctrl, mads, pre_unknown=True, available=False, enabled=False)
-      # In-flight restore from a prior confident TJA is not an UNKNOWN-origin restore.
-    elif ev == 8 and tja_held:
-      # Rapid second TJA while previous restore may be pending.
-      mads = not mads
-      crz = do_tja_press(ctrl, mads, tja=1, pre_unknown=True, available=False, enabled=False)
-      if crz or ctrl._tja_restore_mrcc_off_pending:
-        unknown_restore += 1
-      last_tja_unconfirmed = True
-    else:
-      if pending_arm_delay == 0 and mrcc == "OFF" and not driver_took:
-        mrcc = "ARMED"
-        last_tja_unconfirmed = False
-        pending_arm_delay = -1
-      elif pending_disarm_delay == 0 and mrcc == "ARMED" and not driver_took:
+    for _ in range(RESTORE_FUZZ_ITERATIONS):
+      ev = rng.randrange(16)
+      if ev == 15:
+        ctrl = _controller(False)
+        crz = do_step(ctrl, mads, available=(mrcc in ("ARMED", "ACTIVE")),
+                      enabled=(mrcc == "ACTIVE"))
+        if crz:
+          stale_after_restart += 1
+          synth_after_reinit += 1
+        mads = False
         mrcc = "OFF"
-        last_tja_unconfirmed = False
+        tja_held = False
+        pending_arm_delay = -1
         pending_disarm_delay = -1
-      elif pending_arm_delay > 0:
-        pending_arm_delay -= 1
-      elif pending_disarm_delay > 0:
-        pending_disarm_delay -= 1
-      crz = do_step(ctrl, mads, tja=int(tja_held),
-                    available=(mrcc in ("ARMED", "ACTIVE")),
-                    enabled=(mrcc == "ACTIVE"),
-                    cc_enabled=(mrcc == "ACTIVE"),
-                    long_active=(mrcc == "ACTIVE"),
-                    pre_unknown=(mrcc == "UNKNOWN"))
-      if crz and not tja_held and not driver_took and not last_tja_unconfirmed:
-        if mrcc == "OFF":
-          mrcc = "ARMED"
-        elif mrcc == "ARMED":
-          mrcc = "OFF"
-      if crz and mrcc == "ARMED" and driver_took:
-        pre_armed_cancel += 1
-      if crz and mrcc == "ACTIVE":
-        pre_active_cancel += 1
-      if ctrl._tja_off_comp_tx > TJA_RESTORE_MRCC_MAX_TX:
-        unbounded += 1
-      for f in crz:
-        if f["TJA"] or f["CAN_OFF"] or f["SET_P"] or f["SET_M"] or f["RES"]:
-          panda_reject += 1
+        last_tja_unconfirmed = False
+        driver_took = False
+        continue
 
-  assert false_off == 0
-  assert unknown_restore == 0
-  assert pre_armed_cancel == 0
-  assert pre_active_cancel == 0
-  assert driver_owned_cancel == 0
-  assert mrcc_mads == 0
-  assert set_plus_mads == 0
-  assert set_minus_mads == 0
-  assert res_mads == 0
-  assert cancel_mads == 0
-  assert unbounded == 0
-  assert panda_reject == 0
-  assert stale_after_restart == 0
-  assert synth_after_reinit == 0
-  assert active_tja2_tx == 0
-  assert active_0820_latch == 0
+      kw = snapshot_kw()
+      long_kw = {**kw, "cc_enabled": mrcc == "ACTIVE", "long_active": mrcc == "ACTIVE",
+                 "crz_btns_counter": wheel_ctr}
+      if _ % 10 == 0:
+        wheel_ctr = (wheel_ctr + 1) & 0xF
+
+      if ev == 0:
+        classified_off = (not kw["pre_unknown"] and not kw["pre_available"] and not kw["pre_enabled"])
+        actual_off = mrcc == "OFF"
+        if classified_off and not actual_off and not last_tja_unconfirmed:
+          false_off += 1
+        mads = not mads
+        tja_held = True
+        snap = mrcc
+        crz = do_tja_press(ctrl, mads, tja=1, **long_kw)
+        if kw["pre_unknown"] and (crz or ctrl._tja_restore_mrcc_off_pending):
+          unknown_restore += 1
+        if snap == "ARMED" and crz:
+          pre_armed_cancel += 1
+        if snap == "ACTIVE" and crz:
+          pre_active_cancel += 1
+        if driver_took and snap in ("ARMED", "ACTIVE") and crz:
+          driver_owned_cancel += 1
+        if mrcc == "OFF" and not kw["pre_unknown"]:
+          pending_arm_delay = rng.randrange(4)  # 0–3 cycle delay
+          pending_disarm_delay = -1
+        elif mrcc == "ARMED" and not kw["pre_unknown"]:
+          pending_disarm_delay = rng.randrange(4)
+          pending_arm_delay = -1
+        else:
+          pending_arm_delay = -1
+          pending_disarm_delay = -1
+        last_tja_unconfirmed = False
+        driver_took = False
+        if ctrl._tja_off_comp_tx > TJA_RESTORE_MRCC_MAX_TX:
+          unbounded += 1
+        for f in crz:
+          if f["TJA"] or f["CAN_OFF"] or f["SET_P"] or f["SET_M"] or f["RES"]:
+            panda_reject += 1
+      elif ev == 1:
+        tja_held = False
+        crz = do_step(ctrl, mads, tja=0, **long_kw)
+        if ctrl._tja_off_comp_tx > TJA_RESTORE_MRCC_MAX_TX:
+          unbounded += 1
+        for f in crz:
+          if f["TJA"] or f["CAN_OFF"] or f["SET_P"] or f["SET_M"] or f["RES"]:
+            panda_reject += 1
+      elif ev == 2:
+        crz = do_step(ctrl, mads, mrcc=1, **long_kw)
+        mrcc_mads += _crz_tja_count(crz)
+        if ctrl._tja_off_comp_tx > TJA_RESTORE_MRCC_MAX_TX:
+          unbounded += 1
+        mrcc = "OFF" if mrcc != "OFF" else "ARMED"
+        last_tja_unconfirmed = False
+        driver_took = True
+        pending_arm_delay = -1
+        pending_disarm_delay = -1
+      elif ev in (3, 4):
+        extra = {"set_p": 1} if ev == 3 else {"set_m": 1}
+        crz = do_step(ctrl, mads, **long_kw, **extra)
+        if ev == 3:
+          set_plus_mads += _crz_tja_count(crz)
+        else:
+          set_minus_mads += _crz_tja_count(crz)
+        if ctrl._tja_off_comp_tx > TJA_RESTORE_MRCC_MAX_TX:
+          unbounded += 1
+        if mrcc == "ARMED":
+          mrcc = "ACTIVE"
+        driver_took = True
+        last_tja_unconfirmed = False
+        pending_arm_delay = -1
+        pending_disarm_delay = -1
+      elif ev == 5:
+        crz = do_step(ctrl, mads, res=1, **long_kw)
+        res_mads += _crz_tja_count(crz)
+        if ctrl._tja_off_comp_tx > TJA_RESTORE_MRCC_MAX_TX:
+          unbounded += 1
+        driver_took = True
+        last_tja_unconfirmed = False
+        pending_arm_delay = -1
+        pending_disarm_delay = -1
+      elif ev == 6:
+        crz = do_step(ctrl, mads, cancel=1, **long_kw)
+        cancel_mads += _crz_tja_count(crz)
+        if ctrl._tja_off_comp_tx > TJA_RESTORE_MRCC_MAX_TX:
+          unbounded += 1
+        driver_took = True
+        last_tja_unconfirmed = False
+        pending_arm_delay = -1
+        pending_disarm_delay = -1
+      elif ev == 7:
+        mrcc = "UNKNOWN"
+        last_tja_unconfirmed = True
+        crz = do_step(ctrl, mads, pre_unknown=True, available=False, enabled=False)
+        # In-flight restore from a prior confident TJA is not an UNKNOWN-origin restore.
+      elif ev == 8 and tja_held:
+        # Rapid second TJA while previous restore may be pending.
+        mads = not mads
+        crz = do_tja_press(ctrl, mads, tja=1, pre_unknown=True, available=False, enabled=False)
+        if crz or ctrl._tja_restore_mrcc_off_pending:
+          unknown_restore += 1
+        last_tja_unconfirmed = True
+      else:
+        if pending_arm_delay == 0 and mrcc == "OFF" and not driver_took:
+          mrcc = "ARMED"
+          last_tja_unconfirmed = False
+          pending_arm_delay = -1
+        elif pending_disarm_delay == 0 and mrcc == "ARMED" and not driver_took:
+          mrcc = "OFF"
+          last_tja_unconfirmed = False
+          pending_disarm_delay = -1
+        elif pending_arm_delay > 0:
+          pending_arm_delay -= 1
+        elif pending_disarm_delay > 0:
+          pending_disarm_delay -= 1
+        crz = do_step(ctrl, mads, tja=int(tja_held),
+                      available=(mrcc in ("ARMED", "ACTIVE")),
+                      enabled=(mrcc == "ACTIVE"),
+                      cc_enabled=(mrcc == "ACTIVE"),
+                      long_active=(mrcc == "ACTIVE"),
+                      pre_unknown=(mrcc == "UNKNOWN"))
+        if crz and not tja_held and not driver_took and not last_tja_unconfirmed:
+          if mrcc == "OFF":
+            mrcc = "ARMED"
+          elif mrcc == "ARMED":
+            mrcc = "OFF"
+        if crz and mrcc == "ARMED" and driver_took:
+          pre_armed_cancel += 1
+        if crz and mrcc == "ACTIVE":
+          pre_active_cancel += 1
+        if ctrl._tja_off_comp_tx > TJA_RESTORE_MRCC_MAX_TX:
+          unbounded += 1
+        for f in crz:
+          if f["TJA"] or f["CAN_OFF"] or f["SET_P"] or f["SET_M"] or f["RES"]:
+            panda_reject += 1
+
+    assert false_off == 0
+    assert unknown_restore == 0
+    assert pre_armed_cancel == 0
+    assert pre_active_cancel == 0
+    assert driver_owned_cancel == 0
+    assert mrcc_mads == 0
+    assert set_plus_mads == 0
+    assert set_minus_mads == 0
+    assert res_mads == 0
+    assert cancel_mads == 0
+    assert unbounded == 0
+    assert panda_reject == 0
+    assert stale_after_restart == 0
+    assert synth_after_reinit == 0
+    assert active_tja2_tx == 0
+    assert active_0820_latch == 0

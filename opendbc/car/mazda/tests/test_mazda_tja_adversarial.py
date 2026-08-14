@@ -1,3 +1,4 @@
+import unittest
 """Adversarial same-cycle, CAM_LKAS encoding, and integrated stress for Mazda TJA."""
 
 import random
@@ -78,7 +79,7 @@ def _cc_sp():
   )
 
 
-class TestSameCycleAuthLoss:
+class TestSameCycleAuthLoss(unittest.TestCase):
   def test_tja_off_while_lat_active_packs_zero_and_panda_accepts(self):
     CI = _interface()
     packer = CANPacker("mazda_2017")
@@ -124,7 +125,7 @@ class TestSameCycleAuthLoss:
     assert actuators.torqueOutputCan == 0
 
 
-class TestCamLkasEncoding:
+class TestCamLkasEncoding(unittest.TestCase):
   def test_create_steering_control_matches_checksum_model(self):
     packer = CANPacker("mazda_2017")
     CP = SimpleNamespace(flags=1)  # GEN1
@@ -151,7 +152,7 @@ class TestCamLkasEncoding:
     assert _lkas_request(_lkas_dat(sends_b)) == 0
 
 
-class TestIntegratedStress:
+class TestIntegratedStress(unittest.TestCase):
   def test_million_transitions_no_false_toggle_or_reject(self):
     total = 0
     false_pos = 0
@@ -187,7 +188,7 @@ class TestIntegratedStress:
     assert mrcc_mads == 0
 
 
-class TestPandaUserspaceBatchParity:
+class TestPandaUserspaceBatchParity(unittest.TestCase):
   def test_batch_sequences_match_panda_per_sample(self):
     safety = libsafety_py.libsafety
     spacker = CANPackerSafety("mazda_2017")
@@ -223,14 +224,14 @@ class TestPandaUserspaceBatchParity:
       assert presses == us_toggles, samples
 
 
-class TestAlphaLongSafetyParamTx:
+class TestAlphaLongSafetyParamTx(unittest.TestCase):
   def test_tja_plus_long_still_accepts_stock_crz_info_standby(self):
     safety = libsafety_py.libsafety
     safety.set_safety_hooks(CarParams.SafetyModel.mazda, MazdaSafetyFlags.TJA | MazdaSafetyFlags.LONG)
     safety.init_tests()
     packer = CANPackerSafety("mazda_2017")
     # Standby CRZ_INFO byte-exact stock pattern used by Alpha Long.
-    msg = packer.make_can_msg_safety("CRZ_INFO", 0, {
+    packer.make_can_msg_safety("CRZ_INFO", 0, {
       "STATUS": 1, "STATIC_1": 0x7ff, "ACCEL_CMD": 4.094, "CTR1": 0, "CHKSUM": 0x5d,
     })
     # If packing doesn't hit the allowlist, the safety hook still has the stock_standby path.

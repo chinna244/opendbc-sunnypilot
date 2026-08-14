@@ -29,7 +29,7 @@ class MazdaTjaEdge:
     self.state = UNINITIALIZED
 
   def update(self, tja: bool) -> bool:
-    """Advance one physical CRZ_BTNS sample. Returns True iff this sample toggles MADS once."""
+    """Advance one physical CRZ_BTNS sample. Returns True if and only if this sample toggles MADS once."""
     pressed = bool(tja)
     toggle = False
 

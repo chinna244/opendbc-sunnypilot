@@ -7,7 +7,8 @@ UNKNOWN forbids MRCC_BUTTON compensation.
 
 import random
 
-import pytest
+import unittest
+from opendbc.car.mazda.tests.unittest_compat import parametrize
 
 from opendbc.can import CANPacker
 from opendbc.car import Bus, gen_empty_fingerprint, structs
@@ -99,8 +100,8 @@ def _step_ctrl(ctrl, CS, lat_active, lat_prev=None):
   return _decode_crz(sends)
 
 
-@pytest.mark.parametrize("alpha_long", [False, True])
-class TestAdjacentCycleButtonThenTja:
+@parametrize("alpha_long", [False, True])
+class TestAdjacentCycleButtonThenTja(unittest.TestCase):
   def test_a_off_to_armed_immediate_tja_not_off(self, alpha_long):
     CI, ctrl = _ci(alpha_long)
     p = CANPacker("mazda_2017")
@@ -194,8 +195,8 @@ class TestAdjacentCycleButtonThenTja:
     _assert_clean_can_off(crz)
 
 
-@pytest.mark.parametrize("alpha_long", [False, True])
-class TestSameParserCycleOrdering:
+@parametrize("alpha_long", [False, True])
+class TestSameParserCycleOrdering(unittest.TestCase):
   def test_state_before_tja_reaction_is_prev_cycle(self, alpha_long):
     CI, _ = _ci(alpha_long)
     p = CANPacker("mazda_2017")
@@ -281,9 +282,9 @@ class TestSameParserCycleOrdering:
     assert crz == []
 
 
-@pytest.mark.parametrize("alpha_long", [False, True])
-@pytest.mark.parametrize("delay", [0, 1, 2, 3])
-class TestDelayedCruiseState:
+@parametrize("alpha_long", [False, True])
+@parametrize("delay", [0, 1, 2, 3])
+class TestDelayedCruiseState(unittest.TestCase):
   def _delayed_then_tja(self, alpha_long, delay, start, end, button):
     CI, ctrl = _ci(alpha_long)
     p = CANPacker("mazda_2017")
@@ -334,9 +335,9 @@ class TestDelayedCruiseState:
     assert snap in (ARMED, "UNKNOWN")
 
 
-@pytest.mark.parametrize("alpha_long", [False, True])
-class TestSameFrameLongPlusTja:
-  @pytest.mark.parametrize("btn,key", [
+@parametrize("alpha_long", [False, True])
+class TestSameFrameLongPlusTja(unittest.TestCase):
+  @parametrize("btn,key", [
     ({"MRCC_BUTTON": 1, "TJA_BUTTON": 1}, "MRCC"),
     ({"SET_P": 1, "TJA_BUTTON": 1}, "SET"),
     ({"RES": 1, "TJA_BUTTON": 1}, "RES"),
@@ -355,10 +356,10 @@ class TestSameFrameLongPlusTja:
     assert crz == [], key
 
 
-@pytest.mark.parametrize("alpha_long", [False, True])
-class TestRapidDriverSequences:
-  @pytest.mark.parametrize("gap_ms", [0, 50, 100, 150, 200, 300])
-  @pytest.mark.parametrize("btn,start,mid", [
+@parametrize("alpha_long", [False, True])
+class TestRapidDriverSequences(unittest.TestCase):
+  @parametrize("gap_ms", [0, 50, 100, 150, 200, 300])
+  @parametrize("btn,start,mid", [
     ({"MRCC_BUTTON": 1}, OFF, ARMED),
     ({"SET_P": 1}, ARMED, ACTIVE),
     ({"CAN_OFF": 1}, ACTIVE, ARMED),
@@ -526,9 +527,9 @@ def _fuzz_one(seed, n, alpha_long):
   return false_off, false_can_off, unknown_comp, n
 
 
-class TestOrderingFuzz:
-  @pytest.mark.parametrize("alpha_long", [False, True])
-  @pytest.mark.parametrize("seed", [FUZZ_SEED_A, FUZZ_SEED_B])
+class TestOrderingFuzz(unittest.TestCase):
+  @parametrize("alpha_long", [False, True])
+  @parametrize("seed", [FUZZ_SEED_A, FUZZ_SEED_B])
   def test_fuzz_no_false_off_compensation(self, alpha_long, seed):
     n = FUZZ_TRANSITIONS
     false_off, false_can_off, unknown_comp, nrun = _fuzz_one(seed, n, alpha_long)
@@ -538,21 +539,22 @@ class TestOrderingFuzz:
     assert unknown_comp == 0
 
 
-def test_mrcc_then_delayed_crz_ctrl_then_tja_must_not_snapshot_off():
-  """Cycle N: MRCC press, CRZ_CTRL still OFF. Cycle N+1: CRZ_CTRL ARMED + TJA."""
-  CI, ctrl = _ci()
-  p = CANPacker("mazda_2017")
-  CI.update([(0, [p.make_can_msg("CRZ_BTNS", 0, {}),
-                  p.make_can_msg("CRZ_CTRL", 0, {"CRZ_AVAILABLE": 0, "CRZ_ACTIVE": 0})])])
-  CI.update([(0, [p.make_can_msg("CRZ_BTNS", 0, {"MRCC_BUTTON": 1}),
-                  p.make_can_msg("CRZ_CTRL", 0, {"CRZ_AVAILABLE": 0, "CRZ_ACTIVE": 0})])])
-  CI.update([(0, [p.make_can_msg("CRZ_BTNS", 0, {"TJA_BUTTON": 1}),
-                  p.make_can_msg("CRZ_CTRL", 0, {"CRZ_AVAILABLE": 1, "CRZ_ACTIVE": 0})])])
-  assert CI.CS.tja_toggles_this_update == 1
-  assert not _confident_off(CI.CS)
-  assert CI.CS.tja_pre_cruise_unknown
-  crz = _step_ctrl(ctrl, CI.CS, False, lat_prev=True)
-  CI.update([(0, [p.make_can_msg("CRZ_BTNS", 0, {}),
-                  p.make_can_msg("CRZ_CTRL", 0, {"CRZ_AVAILABLE": 1, "CRZ_ACTIVE": 0})])])
-  crz += _step_ctrl(ctrl, CI.CS, False)
-  assert crz == []
+class TestMazdaTjaPreStateRace(unittest.TestCase):
+  def test_mrcc_then_delayed_crz_ctrl_then_tja_must_not_snapshot_off(self):
+    """Cycle N: MRCC press, CRZ_CTRL still OFF. Cycle N+1: CRZ_CTRL ARMED + TJA."""
+    CI, ctrl = _ci()
+    p = CANPacker("mazda_2017")
+    CI.update([(0, [p.make_can_msg("CRZ_BTNS", 0, {}),
+                    p.make_can_msg("CRZ_CTRL", 0, {"CRZ_AVAILABLE": 0, "CRZ_ACTIVE": 0})])])
+    CI.update([(0, [p.make_can_msg("CRZ_BTNS", 0, {"MRCC_BUTTON": 1}),
+                    p.make_can_msg("CRZ_CTRL", 0, {"CRZ_AVAILABLE": 0, "CRZ_ACTIVE": 0})])])
+    CI.update([(0, [p.make_can_msg("CRZ_BTNS", 0, {"TJA_BUTTON": 1}),
+                    p.make_can_msg("CRZ_CTRL", 0, {"CRZ_AVAILABLE": 1, "CRZ_ACTIVE": 0})])])
+    assert CI.CS.tja_toggles_this_update == 1
+    assert not _confident_off(CI.CS)
+    assert CI.CS.tja_pre_cruise_unknown
+    crz = _step_ctrl(ctrl, CI.CS, False, lat_prev=True)
+    CI.update([(0, [p.make_can_msg("CRZ_BTNS", 0, {}),
+                    p.make_can_msg("CRZ_CTRL", 0, {"CRZ_AVAILABLE": 1, "CRZ_ACTIVE": 0})])])
+    crz += _step_ctrl(ctrl, CI.CS, False)
+    assert crz == []

@@ -2,7 +2,8 @@
 
 import random
 
-import pytest
+import unittest
+from opendbc.car.mazda.tests.unittest_compat import parametrize
 
 from opendbc.can import CANPacker
 from opendbc.car import gen_empty_fingerprint, structs
@@ -33,7 +34,7 @@ def _send_crz(CI, packer, values, extra_msgs=None):
   return ret
 
 
-class TestMazdaTjaEdgeUnit:
+class TestMazdaTjaEdgeUnit(unittest.TestCase):
   def test_boot_held_does_not_toggle(self):
     edge = MazdaTjaEdge()
     assert edge.state == UNINITIALIZED
@@ -81,7 +82,7 @@ class TestMazdaTjaEdgeUnit:
     assert edge.update(True) is True
 
 
-class TestMazdaTjaCarstate:
+class TestMazdaTjaCarstate(unittest.TestCase):
   def test_cx5_2022_has_tja_flag(self):
     CI = _interface()
     assert CI.CP.safetyConfigs[0].safetyParam & MazdaSafetyFlags.TJA
@@ -159,7 +160,7 @@ class TestMazdaTjaCarstate:
     events = _send_crz(CI, packer, {"TJA_BUTTON": 1, "MRCC_BUTTON": 1, "CAN_OFF": 1, "SET_P": 1}).buttonEvents
     assert any(e.type == ButtonType.lkas and e.pressed for e in events)
 
-  @pytest.mark.parametrize("alpha_long", [False, True])
+  @parametrize("alpha_long", [False, True])
   def test_carstate_runs_with_tja_parsers(self, alpha_long):
     CI = _interface(alpha_long=alpha_long)
     packer = CANPacker("mazda_2017")
@@ -167,14 +168,14 @@ class TestMazdaTjaCarstate:
       _send_crz(CI, packer, {})
 
 
-class TestMazdaTjaStress:
+class TestMazdaTjaStress(unittest.TestCase):
   def test_randomized_transitions_no_false_positive(self):
     rng = random.Random(STRESS_SEED)
     edge = MazdaTjaEdge()
     prev = None
     toggles = 0
     armed_rises = 0
-    for i in range(STRESS_TRANSITIONS):
+    for _i in range(STRESS_TRANSITIONS):
       tja = bool(rng.randrange(2)) if rng.random() > 0.15 else (prev if prev is not None else False)
       # Occasional duplicates / drops are just the same or skipped sample.
       if rng.random() < 0.05:
@@ -207,7 +208,7 @@ MULTI_EDGE_CASES = [
 ]
 
 
-class TestMazdaTjaMultiEdgeExactCount:
+class TestMazdaTjaMultiEdgeExactCount(unittest.TestCase):
   def test_physical_edges_match_userspace_toggle_count(self):
     packer = CANPacker("mazda_2017")
     for samples, expected in MULTI_EDGE_CASES:
@@ -249,7 +250,7 @@ class TestMazdaTjaMultiEdgeExactCount:
     assert any(e.pressed for e in mains)
 
 
-class TestTjaPreCruiseCapture:
+class TestTjaPreCruiseCapture(unittest.TestCase):
   """Pre-TJA MRCC state is the previous CarState cycle, not this cycle's OEM reaction."""
 
   def test_same_batch_oem_arm_does_not_look_like_pre_armed(self):
@@ -319,7 +320,7 @@ class TestTjaPreCruiseCapture:
     assert CI.CS.tja_pre_cruise_enabled is False
 
 
-class TestMazdaTjaDbcBits:
+class TestMazdaTjaDbcBits(unittest.TestCase):
   def test_tja_and_mrcc_bits_match_panda_get_bit_numbering(self):
     packer = CANPacker("mazda_2017")
     tja = packer.make_can_msg("CRZ_BTNS", 0, {"TJA_BUTTON": 1})[1]

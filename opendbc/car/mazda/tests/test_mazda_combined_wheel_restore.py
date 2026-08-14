@@ -1,7 +1,8 @@
 """Combined physical-wheel + synthetic restore: one logical MRCC press."""
 from __future__ import annotations
 
-import pytest
+import unittest
+from opendbc.car.mazda.tests.unittest_compat import parametrize
 
 from opendbc.car.mazda.carcontroller import TJA_RESTORE_MRCC_MAX_TX
 from opendbc.car.mazda.tests.mazda_combined_wheel import (
@@ -23,8 +24,8 @@ def _start_pending_off(ctrl, ctr):
   assert ctrl._tja_restore_target == "OFF"
 
 
-class TestCombinedWheelRestore:
-  @pytest.mark.parametrize("alpha_long", [False, True])
+class TestCombinedWheelRestore(unittest.TestCase):
+  @parametrize("alpha_long", [False, True])
   def test_every_phase_and_ctr_is_one_logical_press(self, alpha_long):
     n = 0
     fails = []
@@ -52,7 +53,7 @@ class TestCombinedWheelRestore:
     assert fails == [], fails[:8]
     assert second == [], second[:8]
 
-  @pytest.mark.parametrize("alpha_long", [False, True])
+  @parametrize("alpha_long", [False, True])
   def test_ctr_15_rollover(self, alpha_long):
     ctrl = _controller(alpha_long)
     _start_pending_off(ctrl, 15)
@@ -63,7 +64,7 @@ class TestCombinedWheelRestore:
     assert presses == 1
     assert len({e["ctr"] for e in synth}) == 1
 
-  @pytest.mark.parametrize("delay", [5, 10, 20])
+  @parametrize("delay", [5, 10, 20])
   def test_scheduling_delay_still_one_press(self, delay):
     ctrl = _controller(False)
     _start_pending_off(ctrl, 3)
@@ -103,7 +104,7 @@ class TestCombinedWheelRestore:
     synth = [e for e in events if e["src"] == "synth" and e["mrcc"]]
     assert synth
     locked = synth[0]["ctr"]
-    wheel_same = [e for e in events if e["src"] == "wheel" and e["ctr"] == locked]
+    [e for e in events if e["src"] == "wheel" and e["ctr"] == locked]
     assert presses == 1
     # Next wheel may reuse the packed CTR as the idle/release. That is one press.
 
