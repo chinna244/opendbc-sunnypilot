@@ -655,16 +655,25 @@ class TestTjaMadsOnlyIndependence(unittest.TestCase):
     assert not any(a in (CRZ_BTNS, CRZ_EVENTS) for a, _, _ in sends)
 
   def test_hud_tja2_passthrough_when_mrcc_not_active(self, alpha_long):
-    for available, enabled in ((False, False), (True, False)):
-      ctrl = _controller(alpha_long)
-      crz, sends = _hud_step(ctrl, True, available=available, enabled=enabled,
-                             mads_enabled=True,
-                             cam_laneinfo=_laneinfo_tja(2, transition=2))
-      assert crz == []
-      li = _decode_laneinfo(sends)
-      assert len(li) == 1
-      assert li[0]["TJA"] == 2
-      assert li[0]["TJA_TRANSITION"] == 2
+    # Stage 2J: MADS ON + OFF → TJA=2. MADS ON + ARMED → TJA=0.
+    ctrl = _controller(alpha_long)
+    crz, sends = _hud_step(ctrl, True, available=False, enabled=False,
+                           mads_enabled=True,
+                           cam_laneinfo=_laneinfo_tja(2, transition=2))
+    assert crz == []
+    li = _decode_laneinfo(sends)
+    assert len(li) == 1
+    assert li[0]["TJA"] == 2
+    assert li[0]["TJA_TRANSITION"] == 2
+    ctrl = _controller(alpha_long)
+    crz, sends = _hud_step(ctrl, True, available=True, enabled=False,
+                           mads_enabled=True,
+                           cam_laneinfo=_laneinfo_tja(2, transition=2))
+    assert crz == []
+    li = _decode_laneinfo(sends)
+    assert len(li) == 1
+    assert li[0]["TJA"] == 0
+    assert li[0]["TJA_TRANSITION"] == 2
 
   def test_hud_stage2a_mads_off_forces_tja0(self, alpha_long):
     """Event 38: MADS OFF + MRCC ARMED must not copy FSC TJA=2/3/4."""
@@ -709,7 +718,7 @@ class TestTjaMadsOnlyIndependence(unittest.TestCase):
     li_off = _decode_laneinfo(sends_off)
     li_on = _decode_laneinfo(sends_on)
     assert li_off[0]["TJA"] == 0
-    assert li_on[0]["TJA"] == 2
+    assert li_on[0]["TJA"] == 0
     assert li_off[0]["TJA_TRANSITION"] == li_on[0]["TJA_TRANSITION"] == 2
 
   @parametrize("tja", [0, 1, 2, 3, 4])
@@ -727,7 +736,7 @@ class TestTjaMadsOnlyIndependence(unittest.TestCase):
     assert not any(a in (CRZ_BTNS, CRZ_EVENTS) for a, _, _ in sends)
 
   def test_hud_stage2b_armed_white_matrix(self, alpha_long):
-    """Stage 2B: MADS ON + MRCC ARMED forces TJA=2. OFF/ACTIVE/MADS-off unchanged."""
+    """Stage 2J: MADS ON + MRCC ARMED packs TJA=0. OFF/ACTIVE/MADS-off unchanged."""
     # available, enabled, mads, fsc_tja, expected_tja
     cases = (
       (False, False, False, 0, 0),
@@ -736,10 +745,10 @@ class TestTjaMadsOnlyIndependence(unittest.TestCase):
       (True, False, False, 2, 0),
       (False, False, True, 0, 2),
       (False, False, True, 2, 2),
-      (True, False, True, 0, 2),
-      (True, False, True, 2, 2),
-      (True, False, True, 3, 2),
-      (True, False, True, 4, 2),
+      (True, False, True, 0, 0),
+      (True, False, True, 2, 0),
+      (True, False, True, 3, 0),
+      (True, False, True, 4, 0),
       (True, True, True, 0, 3),
       (True, True, True, 2, 3),
       (True, True, True, 3, 3),
@@ -783,7 +792,7 @@ class TestTjaMadsOnlyIndependence(unittest.TestCase):
     li_off = _decode_laneinfo(sends_off)
     li_on = _decode_laneinfo(sends_on)
     assert li_off[0]["TJA"] == 0
-    assert li_on[0]["TJA"] == 2
+    assert li_on[0]["TJA"] == 0
     assert li_off[0]["TJA_TRANSITION"] == li_on[0]["TJA_TRANSITION"] == 2
 
   def test_hud_stage2b_off_to_armed_sets_tja2(self, alpha_long):
@@ -797,7 +806,7 @@ class TestTjaMadsOnlyIndependence(unittest.TestCase):
                            cam_laneinfo=cam)
     assert crz == []
     li = _decode_laneinfo(sends)
-    assert li[0]["TJA"] == 2
+    assert li[0]["TJA"] == 0
     assert li[0]["TJA_TRANSITION"] == 2
     assert not any(a in (CRZ_BTNS, CRZ_EVENTS) for a, _, _ in sends)
 
@@ -807,7 +816,7 @@ class TestTjaMadsOnlyIndependence(unittest.TestCase):
     crz, sends = _hud_step(ctrl, True, mads_enabled=True, available=True, enabled=False,
                            cam_laneinfo=cam)
     assert crz == []
-    assert _decode_laneinfo(sends)[0]["TJA"] == 2
+    assert _decode_laneinfo(sends)[0]["TJA"] == 0
     crz, sends = _hud_step(ctrl, True, mads_enabled=True, available=True, enabled=True,
                            cc_enabled=True, long_active=True, cam_laneinfo=cam)
     assert crz == []
@@ -827,7 +836,7 @@ class TestTjaMadsOnlyIndependence(unittest.TestCase):
                            cam_laneinfo=cam)
     assert crz == []
     li = _decode_laneinfo(sends)
-    assert li[0]["TJA"] == 2
+    assert li[0]["TJA"] == 0
     assert li[0]["TJA_TRANSITION"] == 2
     assert not any(a in (CRZ_BTNS, CRZ_EVENTS) for a, _, _ in sends)
 
@@ -837,7 +846,7 @@ class TestTjaMadsOnlyIndependence(unittest.TestCase):
     crz, sends = _hud_step(ctrl, True, mads_enabled=True, available=True, enabled=False,
                            cam_laneinfo=cam)
     assert crz == []
-    assert _decode_laneinfo(sends)[0]["TJA"] == 2
+    assert _decode_laneinfo(sends)[0]["TJA"] == 0
     crz, _ = _tja_press(ctrl, False, tja=1, available=True, enabled=False,
                         pre_available=True, pre_enabled=False, cam_laneinfo=cam)
     assert crz == []
@@ -862,7 +871,7 @@ class TestTjaMadsOnlyIndependence(unittest.TestCase):
                            cam_laneinfo=cam)
     assert crz == []
     li = _decode_laneinfo(sends)
-    assert li[0]["TJA"] == 2
+    assert li[0]["TJA"] == 0
     assert li[0]["TJA_TRANSITION"] == 2
 
   def test_pre_active_12_events_never_tx_tja2(self, alpha_long):
@@ -1097,9 +1106,10 @@ class TestMazdaTjaOffLong(unittest.TestCase):
     res_mads = cancel_mads = unbounded = panda_reject = 0
     stale_after_restart = synth_after_reinit = 0
     active_tja2_tx = active_0820_latch = 0
+    armed_tja2_tx = 0
 
     def do_step(ctrl, lat, **kw):
-      nonlocal active_tja2_tx, active_0820_latch
+      nonlocal active_tja2_tx, active_0820_latch, armed_tja2_tx
       cam = dict(CAM_LANEINFO)
       cam["TJA"] = rng.choice([0, 1, 2, 3])
       cam["TJA_TRANSITION"] = rng.choice([0, 2])
@@ -1107,13 +1117,17 @@ class TestMazdaTjaOffLong(unittest.TestCase):
       if rng.randrange(8) == 0:
         ctrl.frame = 50
       crz, sends = _step(ctrl, lat, **kw)
+      mads_on = kw.get("mads_enabled", lat)
       if kw.get("enabled"):
         for li in _decode_laneinfo(sends):
-          mads_on = kw.get("mads_enabled", lat)
           exp = 3 if mads_on else 0
           if li["TJA"] != exp or li["TJA"] in (2, 4):
             active_tja2_tx += 1
             active_0820_latch += 1
+      elif kw.get("available") and mads_on:
+        for li in _decode_laneinfo(sends):
+          if li["TJA"] == 2:
+            armed_tja2_tx += 1
       return crz
 
     def do_tja_press(ctrl, lat_after, **kw):
@@ -1311,3 +1325,4 @@ class TestMazdaTjaOffLong(unittest.TestCase):
     assert synth_after_reinit == 0
     assert active_tja2_tx == 0
     assert active_0820_latch == 0
+    assert armed_tja2_tx == 0

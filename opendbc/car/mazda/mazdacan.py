@@ -142,7 +142,7 @@ def create_steering_control(packer, CP, frame, apply_torque, lkas):
 
 def create_alert_command(packer, cam_msg: dict, ldw: bool, steer_required: bool,
                          mrcc_active: bool = False, mads_enabled: bool = True,
-                         mrcc_armed: bool = False):
+                         mrcc_armed: bool = False, force_tja0: bool = False):
   values = {s: cam_msg[s] for s in [
     "LINE_VISIBLE",
     "LINE_NOT_VISIBLE",
@@ -171,18 +171,19 @@ def create_alert_command(packer, cam_msg: dict, ldw: bool, steer_required: bool,
   for sig in ("TJA", "TJA_TRANSITION"):
     if sig in cam_msg:
       values[sig] = cam_msg[sig]
-  # Stage 2G candidate HUD. Presentation only. Does not create cruise state.
-  #   MADS disabled → 0 (Stage 2A Event 38)
-  #   MADS ON + MRCC ACTIVE → stable TJA=3 (not 4; independent of FSC TJA)
-  #   MADS ON + MRCC ARMED → TJA=2 (Stage 2B)
-  #   MADS ON + MRCC OFF → TJA=2 (moving OFF is the vehicle-validation question)
+  # Stage 2J final stock-hardware HUD. Presentation only. Does not create
+  # cruise state. TJA_TRANSITION is still copied from FSC. Never emit TJA=4.
+  #   MADS disabled → 0 (any MRCC)
+  #   MADS ON + MRCC ACTIVE → stable TJA=3
+  #   MADS ON + MRCC ARMED → TJA=0 (compromise #2: physical MRCC ARMED→OFF)
+  #   MADS ON + MRCC OFF → TJA=2, except force_tja0 while OFF restore pending
   if not mads_enabled:
     values["TJA"] = 0
   elif mrcc_active:
     values["TJA"] = 3
+  elif mrcc_armed or force_tja0:
+    values["TJA"] = 0
   else:
-    # MRCC ARMED and MRCC OFF both present TJA=2 when MADS is on.
-    _ = mrcc_armed
     values["TJA"] = 2
   return packer.make_can_msg("CAM_LANEINFO", 0, values)
 

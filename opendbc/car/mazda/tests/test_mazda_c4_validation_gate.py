@@ -579,6 +579,8 @@ class TestCamLaneinfoExhaustive(unittest.TestCase):
               expected = 0
             elif mrcc == "ACTIVE":
               expected = 3
+            elif mrcc == "ARMED":
+              expected = 0
             else:
               expected = 2
             if packed != expected:
@@ -830,9 +832,10 @@ class TestMazdaC4ValidationGate(unittest.TestCase):
     mads_parity = 0
 
     park_nonzero = wrong_gear_steer = 0
+    armed_tja2_tx = 0
 
     def do_step(ctrl, lat, gear="drive", park_brake=False, **kw):
-      nonlocal active_tja2_tx, park_nonzero, wrong_gear_steer
+      nonlocal active_tja2_tx, park_nonzero, wrong_gear_steer, armed_tja2_tx
       cam = dict(CAM_LANEINFO)
       cam["TJA"] = rng.choice([0, 1, 2, 3])
       cam["TJA_TRANSITION"] = rng.choice([0, 2])
@@ -846,12 +849,16 @@ class TestMazdaC4ValidationGate(unittest.TestCase):
           wrong_gear_steer += 1
         lat = False
       crz, sends = _step(ctrl, lat, **kw)
+      mads_on = kw.get("mads_enabled", lat)
       if kw.get("enabled"):
         for li in _decode_laneinfo(sends):
-          mads_on = kw.get("mads_enabled", lat)
           exp = 3 if mads_on else 0
           if li["TJA"] != exp or li["TJA"] in (2, 4):
             active_tja2_tx += 1
+      elif kw.get("available") and mads_on:
+        for li in _decode_laneinfo(sends):
+          if li["TJA"] == 2:
+            armed_tja2_tx += 1
       return crz
 
     ctrl = _controller(False)
@@ -1009,6 +1016,7 @@ class TestMazdaC4ValidationGate(unittest.TestCase):
     assert stale_after_restart == 0
     assert synth_after_reinit == 0
     assert active_tja2_tx == 0
+    assert armed_tja2_tx == 0
     assert mads_parity == 0
     assert park_nonzero == 0
     assert wrong_gear_steer == 0

@@ -739,7 +739,7 @@ class TestMazdaHudStage2aMadsOff(unittest.TestCase):
 
 
 class TestMazdaHudStage2bArmedWhite(unittest.TestCase):
-  """MADS ON + MRCC ARMED forces bus-0 TJA=2. OFF/ACTIVE/MADS-off unchanged."""
+  """Stage 2J: MADS ON + MRCC ARMED packs TJA=0. OFF/ACTIVE/MADS-off unchanged."""
 
   COPIED = TestMazdaHudStage2aMadsOff.COPIED
 
@@ -800,28 +800,28 @@ class TestMazdaHudStage2bArmedWhite(unittest.TestCase):
     assert vl["TJA"] == 2
     assert vl["TJA_TRANSITION"] == 2
 
-  def test_mads_on_armed_fsc0_outputs_2(self):
+  def test_mads_on_armed_fsc0_outputs_0(self):
     vl = self._pack(self._parser(), self._cam(0, 2, 1), mrcc_active=False, mads_enabled=True,
                     mrcc_armed=True)
-    assert vl["TJA"] == 2
+    assert vl["TJA"] == 0
     assert vl["TJA_TRANSITION"] == 2
 
-  def test_mads_on_armed_fsc2_outputs_2(self):
+  def test_mads_on_armed_fsc2_outputs_0(self):
     vl = self._pack(self._parser(), self._cam(2), mrcc_active=False, mads_enabled=True,
                     mrcc_armed=True)
-    assert vl["TJA"] == 2
+    assert vl["TJA"] == 0
     assert vl["TJA_TRANSITION"] == 2
 
-  def test_mads_on_armed_fsc3_outputs_2_not_3(self):
+  def test_mads_on_armed_fsc3_outputs_0_not_3(self):
     vl = self._pack(self._parser(), self._cam(3), mrcc_active=False, mads_enabled=True,
                     mrcc_armed=True)
-    assert vl["TJA"] == 2
+    assert vl["TJA"] == 0
     assert vl["TJA_TRANSITION"] == 2
 
-  def test_mads_on_armed_fsc4_outputs_2_not_4(self):
+  def test_mads_on_armed_fsc4_outputs_0_not_4(self):
     vl = self._pack(self._parser(), self._cam(4), mrcc_active=False, mads_enabled=True,
                     mrcc_armed=True)
-    assert vl["TJA"] == 2
+    assert vl["TJA"] == 0
     assert vl["TJA_TRANSITION"] == 2
 
   def test_mads_on_active_fsc0(self):
@@ -848,7 +848,7 @@ class TestMazdaHudStage2bArmedWhite(unittest.TestCase):
   def test_transition_and_copied_fields_unchanged(self):
     cam = self._cam(3, transition=2, lane_lines=3)
     vl = self._pack(self._parser(), cam, mrcc_active=False, mads_enabled=True, mrcc_armed=True)
-    assert vl["TJA"] == 2
+    assert vl["TJA"] == 0
     assert vl["TJA_TRANSITION"] == 2
     for s in self.COPIED:
       assert vl[s] == cam[s], s

@@ -109,6 +109,21 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     self._tja_restore_mismatch_ctr = None
     self._tja_restore_wait_period = 0
     self._tja_restore_brake_at_edge = False
+    # Stage 2J: last packed OFF-restore HUD hold. Extra CAM_LANEINFO on
+    # assert/clear so TJA=0 is visible before restore TX and TJA=2 resumes
+    # without waiting for the 2 Hz slot. Not a timer.
+    self._hud_off_restore_tja0_hold = False
+    # Last packed TJA. Extra CAM_LANEINFO when the Stage 2J desired value
+    # changes (OFF→ARMED TJA=2→0 must be on the bus before physical MRCC).
+    self._hud_tja_last = None
+
+  def _hud_hold_tja0_for_off_restore(self, CC_SP) -> bool:
+    """True while MADS is on and OFF-preservation restore is still unresolved.
+
+    Authoritative pending source is _tja_restore_target (CarController).
+    Do not duplicate panda/carstate restore state. ARMED restore is not held.
+    """
+    return bool(CC_SP.mads.enabled) and self._tja_restore_target == "OFF"
 
   @property
   def _tja_restore_mrcc_off_pending(self) -> bool:
@@ -243,19 +258,43 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       can_sends.extend(self.update_longitudinal(CC, CC_SP, CS, virtual_resume_sent))
 
     # send HUD alerts
-    if self.frame % 50 == 0:
+    # Stage 2J: hold bus0 TJA=0 while the existing OFF-preservation restore
+    # is unresolved. Authoritative pending flag is
+    # _tja_restore_target == "OFF". Do not invent a second timer or MRCC pulse.
+    # ARMED packs TJA=0 as steady policy (compromise #2), not via Stage 2H
+    # post-edge blanking.
+    hold_tja0 = self._hud_hold_tja0_for_off_restore(CC_SP)
+    # Last restore TX frame may have just cleared the target. Keep TJA=0
+    # alongside that pulse so the first restore edge is not raced by TJA=2.
+    if tja_off_comp and self._hud_off_restore_tja0_hold:
+      hold_tja0 = True
+    mrcc_active = bool(CS.out.cruiseState.enabled)
+    mrcc_armed = bool(CS.out.cruiseState.available) and not mrcc_active
+    mads_on = bool(CC_SP.mads.enabled)
+    if not mads_on:
+      desired_tja = 0
+    elif mrcc_active:
+      desired_tja = 3
+    elif mrcc_armed or hold_tja0:
+      desired_tja = 0
+    else:
+      desired_tja = 2
+    hud_due = (self.frame % 50 == 0) or (hold_tja0 != self._hud_off_restore_tja0_hold)
+    if self._hud_tja_last is not None and desired_tja != self._hud_tja_last:
+      hud_due = True
+    self._hud_off_restore_tja0_hold = hold_tja0
+    if hud_due:
       ldw = CC.hudControl.visualAlert == VisualAlert.ldw
       steer_required = CC.hudControl.visualAlert == VisualAlert.steerRequired
       # TODO: find a way to silence audible warnings so we can add more hud alerts
       steer_required = steer_required and CS.lkas_allowed_speed
       # Presentation plumbing only. Reads existing cruiseState / MADS flags.
       # Does not create MRCC or MADS transitions.
-      # ARMED = cruise available and not enabled (same as _cruise_label).
-      mrcc_active = bool(CS.out.cruiseState.enabled)
-      mrcc_armed = bool(CS.out.cruiseState.available) and not mrcc_active
       can_sends.append(mazdacan.create_alert_command(
         self.packer, CS.cam_laneinfo, ldw, steer_required,
-        mrcc_active, bool(CC_SP.mads.enabled), mrcc_armed))
+        mrcc_active, mads_on, mrcc_armed,
+        force_tja0=hold_tja0))
+      self._hud_tja_last = desired_tja
 
     # send steering command
     can_sends.append(mazdacan.create_steering_control(self.packer, self.CP,

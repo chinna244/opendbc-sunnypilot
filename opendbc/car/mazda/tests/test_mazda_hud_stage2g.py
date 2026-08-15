@@ -40,6 +40,8 @@ def _expected(mads, mrcc):
     return 0
   if mrcc == "ACTIVE":
     return 3
+  if mrcc == "ARMED":
+    return 0
   return 2
 
 
@@ -77,7 +79,7 @@ class TestMazdaHudStage2gMatrix(unittest.TestCase):
       (False, "OFF", 0),
       (True, "OFF", 2),
       (False, "ARMED", 0),
-      (True, "ARMED", 2),
+      (True, "ARMED", 0),
       (False, "ACTIVE", 0),
       (True, "ACTIVE", 3),
     )
@@ -135,7 +137,7 @@ class TestMazdaHudStage2gTransitions(unittest.TestCase):
     crz, sends = _hud_step(ctrl, True, mads_enabled=True, available=True, enabled=False,
                            cam_laneinfo=cam)
     assert crz == []
-    assert _decode_laneinfo(sends)[0]["TJA"] == 2
+    assert _decode_laneinfo(sends)[0]["TJA"] == 0
     crz, sends = _hud_step(ctrl, False, mads_enabled=False, available=True, enabled=False,
                            cam_laneinfo=cam)
     assert crz == []
