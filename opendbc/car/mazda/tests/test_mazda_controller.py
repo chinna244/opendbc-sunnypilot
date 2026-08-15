@@ -610,10 +610,10 @@ class TestMazdaHudUnchanged(unittest.TestCase):
     msg = mazdacan.create_alert_command(packer, cam_msg, ldw=False, steer_required=False)
     parser.update([(0, [msg])])
     vl = parser.vl["CAM_LANEINFO"]
-    assert vl["TJA"] == 0
+    assert vl["TJA"] == 2
     assert vl["TJA_TRANSITION"] == 0
 
-  def test_create_alert_command_clamps_engaged_tja_when_mrcc_active(self):
+  def test_create_alert_command_stable_tja3_when_mrcc_active(self):
     packer = CANPacker("mazda_2017")
     parser = CANParser("mazda_2017", [("CAM_LANEINFO", 0)], 0)
     for st in parser.message_states.values():
@@ -626,12 +626,13 @@ class TestMazdaHudUnchanged(unittest.TestCase):
     )}
     cam_msg["TJA_TRANSITION"] = 2
     cam_msg["LANE_LINES"] = 3
-    for tja in (2, 3, 4):
+    for tja in (0, 2, 3, 4):
       cam_msg["TJA"] = tja
       msg = mazdacan.create_alert_command(packer, cam_msg, False, False, mrcc_active=True)
       parser.update([(0, [msg])])
       vl = parser.vl["CAM_LANEINFO"]
-      assert vl["TJA"] == 0, tja
+      assert vl["TJA"] == 3, tja
+      assert vl["TJA"] != 4
       assert vl["TJA_TRANSITION"] == 2
       assert vl["LANE_LINES"] == 3
 
@@ -639,7 +640,7 @@ class TestMazdaHudUnchanged(unittest.TestCase):
                                           mads_enabled=True)
       parser.update([(0, [msg])])
       vl = parser.vl["CAM_LANEINFO"]
-      assert vl["TJA"] == tja
+      assert vl["TJA"] == 2
       assert vl["TJA_TRANSITION"] == 2
       assert vl["LANE_LINES"] == 3
 
@@ -707,24 +708,25 @@ class TestMazdaHudStage2aMadsOff(unittest.TestCase):
     assert vl["TJA"] == 2
     assert vl["TJA_TRANSITION"] == 2
 
-  def test_mads_on_mrcc_off_preserves_tja0(self):
+  def test_mads_on_mrcc_off_invents_tja2(self):
     vl = self._pack(self._parser(), self._cam(0, 2, 1), mrcc_active=False, mads_enabled=True)
-    assert vl["TJA"] == 0
+    assert vl["TJA"] == 2
     assert vl["TJA_TRANSITION"] == 2
 
-  def test_mads_on_active_clamp_tja2(self):
+  def test_mads_on_active_stable_tja3_from_tja2(self):
     vl = self._pack(self._parser(), self._cam(2), mrcc_active=True, mads_enabled=True)
-    assert vl["TJA"] == 0
+    assert vl["TJA"] == 3
     assert vl["TJA_TRANSITION"] == 2
 
-  def test_mads_on_active_clamp_tja3(self):
+  def test_mads_on_active_stable_tja3(self):
     vl = self._pack(self._parser(), self._cam(3), mrcc_active=True, mads_enabled=True)
-    assert vl["TJA"] == 0
+    assert vl["TJA"] == 3
     assert vl["TJA_TRANSITION"] == 2
 
-  def test_mads_on_active_clamp_tja4(self):
+  def test_mads_on_active_never_tja4(self):
     vl = self._pack(self._parser(), self._cam(4), mrcc_active=True, mads_enabled=True)
-    assert vl["TJA"] == 0
+    assert vl["TJA"] == 3
+    assert vl["TJA"] != 4
     assert vl["TJA_TRANSITION"] == 2
 
   def test_mads_off_does_not_rewrite_transition_or_copied_fields(self):
@@ -788,9 +790,9 @@ class TestMazdaHudStage2bArmedWhite(unittest.TestCase):
     assert vl["TJA"] == 0
     assert vl["TJA_TRANSITION"] == 2
 
-  def test_mads_on_off_fsc0_does_not_invent_tja2(self):
+  def test_mads_on_off_fsc0_invents_tja2(self):
     vl = self._pack(self._parser(), self._cam(0, 2, 1), mrcc_active=False, mads_enabled=True)
-    assert vl["TJA"] == 0
+    assert vl["TJA"] == 2
     assert vl["TJA_TRANSITION"] == 2
 
   def test_mads_on_off_fsc2_preserves_stage2a(self):
@@ -825,14 +827,15 @@ class TestMazdaHudStage2bArmedWhite(unittest.TestCase):
   def test_mads_on_active_fsc0(self):
     vl = self._pack(self._parser(), self._cam(0, 0, 1), mrcc_active=True, mads_enabled=True,
                     mrcc_armed=True)
-    assert vl["TJA"] == 0
+    assert vl["TJA"] == 3
     assert vl["TJA_TRANSITION"] == 0
 
-  def test_mads_on_active_clamp_2_3_4(self):
+  def test_mads_on_active_stable_tja3_not_4(self):
     for tja in (2, 3, 4):
       vl = self._pack(self._parser(), self._cam(tja), mrcc_active=True, mads_enabled=True,
                       mrcc_armed=True)
-      assert vl["TJA"] == 0, tja
+      assert vl["TJA"] == 3, tja
+      assert vl["TJA"] != 4
       assert vl["TJA_TRANSITION"] == 2
 
   def test_mads_off_active_clamp_2_3_4(self):

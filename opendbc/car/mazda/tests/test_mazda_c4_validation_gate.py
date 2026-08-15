@@ -140,7 +140,8 @@ def _replay_tja_event(ev, alpha_long):
     crz, sends = _hud_step(ctrl, lat, **kw)
     acc(crz)
     for li in _decode_laneinfo(sends):
-      if li["TJA"] in (2, 3, 4):
+      exp = 3 if lat else 0
+      if li["TJA"] != exp or li["TJA"] in (2, 4):
         tja2 += 1
     crz, _ = _tja_press(ctrl, lat, tja=1, **kw)
     acc(crz)
@@ -277,7 +278,8 @@ def _replay_long_button(ev, name, alpha_long):
       _, sends = _step(ctrl, pre_mads, toggles=0, **kw, **extra,
                        cam_laneinfo=_laneinfo_tja(cam_tja))
       for li in _decode_laneinfo(sends):
-        if li["TJA"] in (2, 3, 4):
+        exp = 3 if pre_mads else 0
+        if li["TJA"] != exp or li["TJA"] in (2, 4):
           li_tja2 += 1
           fail.append("tja_engaged")
   return {
@@ -359,7 +361,8 @@ class TestGeneratedFullStateSpace(unittest.TestCase):
                       ctrl.frame = 50
                       _, sends = _step(ctrl, lat, **{**kw, **long_kw})
                       for li in _decode_laneinfo(sends):
-                        if li["TJA"] in (2, 3, 4):
+                        exp = 3 if lat else 0
+                        if li["TJA"] != exp or li["TJA"] in (2, 4):
                           bad.append("tja_engaged")
                     # delayed / dropped cruise feedback after an OFF TJA
                     if tja_ev == "release" and mrcc == "OFF" and long_name == "none":
@@ -575,13 +578,11 @@ class TestCamLaneinfoExhaustive(unittest.TestCase):
             if not mads:
               expected = 0
             elif mrcc == "ACTIVE":
-              expected = 0 if tja in (2, 3, 4) else tja
-            elif mrcc == "ARMED":
-              expected = 2
+              expected = 3
             else:
-              expected = tja
+              expected = 2
             if packed != expected:
-              if mrcc == "ACTIVE" and expected == 0:
+              if mrcc == "ACTIVE" and packed in (2, 4):
                 tja2_active += 1
               invalid += 1
             if li[0]["TJA_TRANSITION"] != trans:
@@ -847,7 +848,9 @@ class TestMazdaC4ValidationGate(unittest.TestCase):
       crz, sends = _step(ctrl, lat, **kw)
       if kw.get("enabled"):
         for li in _decode_laneinfo(sends):
-          if li["TJA"] in (2, 3, 4):
+          mads_on = kw.get("mads_enabled", lat)
+          exp = 3 if mads_on else 0
+          if li["TJA"] != exp or li["TJA"] in (2, 4):
             active_tja2_tx += 1
       return crz
 

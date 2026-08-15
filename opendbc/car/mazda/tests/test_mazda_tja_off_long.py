@@ -639,7 +639,7 @@ class TestTjaMadsOnlyIndependence(unittest.TestCase):
         violations += 1
     assert violations == 0
 
-  def test_hud_tja2_clamped_while_mrcc_active(self, alpha_long):
+  def test_hud_tja3_stable_while_mrcc_active(self, alpha_long):
     ctrl = _controller(alpha_long)
     cam = _laneinfo_tja(2, transition=2)
     cam["LANE_LINES"] = 3
@@ -648,9 +648,11 @@ class TestTjaMadsOnlyIndependence(unittest.TestCase):
     assert crz == []
     li = _decode_laneinfo(sends)
     assert len(li) == 1
-    assert li[0]["TJA"] == 0
+    assert li[0]["TJA"] == 3
+    assert li[0]["TJA"] != 4
     assert li[0]["TJA_TRANSITION"] == 2
     assert li[0]["LANE_LINES"] == 3
+    assert not any(a in (CRZ_BTNS, CRZ_EVENTS) for a, _, _ in sends)
 
   def test_hud_tja2_passthrough_when_mrcc_not_active(self, alpha_long):
     for available, enabled in ((False, False), (True, False)):
@@ -710,33 +712,19 @@ class TestTjaMadsOnlyIndependence(unittest.TestCase):
     assert li_on[0]["TJA"] == 2
     assert li_off[0]["TJA_TRANSITION"] == li_on[0]["TJA_TRANSITION"] == 2
 
-  @parametrize("tja", [0, 1])
-  def test_hud_non_engaged_tja_passthrough_while_active(self, alpha_long, tja):
+  @parametrize("tja", [0, 1, 2, 3, 4])
+  def test_hud_active_mads_on_stable_tja3(self, alpha_long, tja):
+    """Stage 2G: MADS ON + ACTIVE always packs TJA=3. Never 4. FSC is not leaked."""
     ctrl = _controller(alpha_long)
     crz, sends = _hud_step(ctrl, True, available=True, enabled=True,
                            cc_enabled=True, long_active=True,
-                           cam_laneinfo=_laneinfo_tja(tja, transition=0))
+                           cam_laneinfo=_laneinfo_tja(tja, transition=2 if tja else 0))
     assert crz == []
     li = _decode_laneinfo(sends)
     assert len(li) == 1
-    assert li[0]["TJA"] == tja
-
-  @parametrize("tja", [2, 3, 4])
-  def test_hud_engaged_tja_clamped_while_mrcc_active(self, alpha_long, tja):
-    """Functional MRCC preservation: TJA 2/3/4 while ACTIVE canceled cruise.
-
-    Route 00000019 events 24/40/43/46 packed TJA=3, not TJA=2. Event 28 kept
-    ACTIVE with TJA=0. Do not rewrite TJA_TRANSITION.
-    """
-    ctrl = _controller(alpha_long)
-    crz, sends = _hud_step(ctrl, True, available=True, enabled=True,
-                           cc_enabled=True, long_active=True,
-                           cam_laneinfo=_laneinfo_tja(tja, transition=2))
-    assert crz == []
-    li = _decode_laneinfo(sends)
-    assert len(li) == 1
-    assert li[0]["TJA"] == 0
-    assert li[0]["TJA_TRANSITION"] == 2
+    assert li[0]["TJA"] == 3
+    assert li[0]["TJA"] != 4
+    assert not any(a in (CRZ_BTNS, CRZ_EVENTS) for a, _, _ in sends)
 
   def test_hud_stage2b_armed_white_matrix(self, alpha_long):
     """Stage 2B: MADS ON + MRCC ARMED forces TJA=2. OFF/ACTIVE/MADS-off unchanged."""
@@ -746,16 +734,16 @@ class TestTjaMadsOnlyIndependence(unittest.TestCase):
       (False, False, False, 2, 0),
       (True, False, False, 0, 0),
       (True, False, False, 2, 0),
-      (False, False, True, 0, 0),
+      (False, False, True, 0, 2),
       (False, False, True, 2, 2),
       (True, False, True, 0, 2),
       (True, False, True, 2, 2),
       (True, False, True, 3, 2),
       (True, False, True, 4, 2),
-      (True, True, True, 0, 0),
-      (True, True, True, 2, 0),
-      (True, True, True, 3, 0),
-      (True, True, True, 4, 0),
+      (True, True, True, 0, 3),
+      (True, True, True, 2, 3),
+      (True, True, True, 3, 3),
+      (True, True, True, 4, 3),
       (True, True, False, 2, 0),
       (True, True, False, 3, 0),
       (True, True, False, 4, 0),
@@ -804,7 +792,7 @@ class TestTjaMadsOnlyIndependence(unittest.TestCase):
     crz, sends = _hud_step(ctrl, True, mads_enabled=True, available=False, enabled=False,
                            cam_laneinfo=cam)
     assert crz == []
-    assert _decode_laneinfo(sends)[0]["TJA"] == 0
+    assert _decode_laneinfo(sends)[0]["TJA"] == 2
     crz, sends = _hud_step(ctrl, True, mads_enabled=True, available=True, enabled=False,
                            cam_laneinfo=cam)
     assert crz == []
@@ -813,7 +801,7 @@ class TestTjaMadsOnlyIndependence(unittest.TestCase):
     assert li[0]["TJA_TRANSITION"] == 2
     assert not any(a in (CRZ_BTNS, CRZ_EVENTS) for a, _, _ in sends)
 
-  def test_hud_stage2b_armed_to_active_clamps_tja0(self, alpha_long):
+  def test_hud_stage2g_armed_to_active_stable_tja3(self, alpha_long):
     ctrl = _controller(alpha_long)
     cam = _laneinfo_tja(2, transition=2)
     crz, sends = _hud_step(ctrl, True, mads_enabled=True, available=True, enabled=False,
@@ -824,7 +812,7 @@ class TestTjaMadsOnlyIndependence(unittest.TestCase):
                            cc_enabled=True, long_active=True, cam_laneinfo=cam)
     assert crz == []
     li = _decode_laneinfo(sends)
-    assert li[0]["TJA"] == 0
+    assert li[0]["TJA"] == 3
     assert li[0]["TJA_TRANSITION"] == 2
     assert not any(a == CRZ_EVENTS for a, _, _ in sends)
 
@@ -834,7 +822,7 @@ class TestTjaMadsOnlyIndependence(unittest.TestCase):
     crz, sends = _hud_step(ctrl, True, mads_enabled=True, available=True, enabled=True,
                            cc_enabled=True, long_active=True, cam_laneinfo=cam)
     assert crz == []
-    assert _decode_laneinfo(sends)[0]["TJA"] == 0
+    assert _decode_laneinfo(sends)[0]["TJA"] == 3
     crz, sends = _hud_step(ctrl, True, mads_enabled=True, available=True, enabled=False,
                            cam_laneinfo=cam)
     assert crz == []
@@ -907,9 +895,11 @@ class TestTjaMadsOnlyIndependence(unittest.TestCase):
       li = _decode_laneinfo(sends)
       assert len(li) == 1, (route, t_s)
       packed = li[0]["TJA"]
-      if packed in (2, 3, 4):
+      if packed in (2, 4):
         tja2_tx += 1
         latch_0820 += 1
+      if packed != 3:
+        tja2_tx += 1
       crz, sends = _tja_press(ctrl, False, tja=1, available=True, enabled=True,
                               pre_available=True, pre_enabled=True,
                               cc_enabled=True, long_active=True, cam_laneinfo=cam)
@@ -921,7 +911,7 @@ class TestTjaMadsOnlyIndependence(unittest.TestCase):
         if crz:
           event_synth += 1
       synth += event_synth
-      if packed not in (2, 3, 4) and event_synth == 0:
+      if packed == 3 and event_synth == 0:
         pass_count += 1
     assert tja2_tx == 0
     assert latch_0820 == 0
@@ -1004,7 +994,8 @@ class TestTjaMadsOnlyIndependence(unittest.TestCase):
                                cc_enabled=pre_en, long_active=pre_en, cam_laneinfo=cam)
         if pre_mrcc == "ACTIVE":
           for li in _decode_laneinfo(sends):
-            if li["TJA"] in (2, 3, 4):
+            exp = 3 if expected_mads else 0
+            if li["TJA"] != exp or li["TJA"] in (2, 4):
               fails.append((eid, "tja_engaged_packed", li["TJA"]))
         crz, _ = _tja_press(ctrl, expected_mads, tja=1, available=hist_av, enabled=hist_en,
                             pre_available=pre_av, pre_enabled=pre_en, cam_laneinfo=cam)
@@ -1078,7 +1069,8 @@ class TestTjaMadsOnlyIndependence(unittest.TestCase):
         if pre_mrcc == "ACTIVE":
           _, sends = _hud_step(ctrl, pre_mads, **kw)
           for li in _decode_laneinfo(sends):
-            if li["TJA"] in (2, 3, 4):
+            exp = 3 if pre_mads else 0
+            if li["TJA"] != exp or li["TJA"] in (2, 4):
               fails.append((eid, "tja_engaged_packed", li["TJA"]))
     assert fails == [], fails[:8]
 
@@ -1117,7 +1109,9 @@ class TestMazdaTjaOffLong(unittest.TestCase):
       crz, sends = _step(ctrl, lat, **kw)
       if kw.get("enabled"):
         for li in _decode_laneinfo(sends):
-          if li["TJA"] in (2, 3, 4):
+          mads_on = kw.get("mads_enabled", lat)
+          exp = 3 if mads_on else 0
+          if li["TJA"] != exp or li["TJA"] in (2, 4):
             active_tja2_tx += 1
             active_0820_latch += 1
       return crz

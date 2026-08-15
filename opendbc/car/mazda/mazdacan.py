@@ -165,24 +165,24 @@ def create_alert_command(packer, cam_msg: dict, ldw: bool, steer_required: bool,
     "LDW_WARN_LL": 0,
     "LDW_WARN_RL": 0,
   })
-  # Preserve camera TJA / TJA_TRANSITION when present. Do not invent TJA from
-  # MADS-on while MRCC is OFF. Leave TJA_TRANSITION / LANE_LINES / other HUD
-  # fields unchanged except the TJA state-gate below.
+  # Preserve camera TJA / TJA_TRANSITION when present. TJA_TRANSITION is copied
+  # unchanged (Stage 2B). Leave LANE_LINES / other HUD fields alone except the
+  # TJA state-gate below. Never derive TJA from steer torque. Never emit TJA=4.
   for sig in ("TJA", "TJA_TRANSITION"):
     if sig in cam_msg:
       values[sig] = cam_msg[sig]
-  # Presentation-only TJA gate. Does not create cruise state.
+  # Stage 2G candidate HUD. Presentation only. Does not create cruise state.
   #   MADS disabled → 0 (Stage 2A Event 38)
-  #   MRCC ACTIVE + TJA in {2,3,4} → 0 (Route 00000019)
-  #   MADS enabled + MRCC ARMED → 2 (Stage 2B white standby). Force 2 so FSC
-  #     3/4 cannot leak an OEM-engaged value while ARMED.
-  #   MRCC OFF → keep copied FSC TJA. Do not invent 2; moving OFF is unproven.
+  #   MADS ON + MRCC ACTIVE → stable TJA=3 (not 4; independent of FSC TJA)
+  #   MADS ON + MRCC ARMED → TJA=2 (Stage 2B)
+  #   MADS ON + MRCC OFF → TJA=2 (moving OFF is the vehicle-validation question)
   if not mads_enabled:
     values["TJA"] = 0
   elif mrcc_active:
-    if int(values.get("TJA", 0) or 0) in (2, 3, 4):
-      values["TJA"] = 0
-  elif mrcc_armed:
+    values["TJA"] = 3
+  else:
+    # MRCC ARMED and MRCC OFF both present TJA=2 when MADS is on.
+    _ = mrcc_armed
     values["TJA"] = 2
   return packer.make_can_msg("CAM_LANEINFO", 0, values)
 
