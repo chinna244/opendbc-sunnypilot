@@ -27,13 +27,24 @@ TJA_RESTORE_MRCC_TIMEOUT_FRAMES = 250  # 2.5 s at 100 Hz
 # one-press primitive on this bus is to keep
 # every synthetic MRCC=1 inside a single wheel period, then let the next idle
 # be the release. Wait for the first CTR change after mismatch (full period),
-# lock one CTR, TX at 100 Hz, stop on the next wheel CTR. Cap is one period.
+# lock one CTR, TX at 100 Hz, stop on the next wheel CTR.
+# Stage 2M: at most TWO such periods for OFF restoration of one physical TJA.
 TJA_RESTORE_MRCC_MAX_TX = 10
+TJA_RESTORE_MAX_ATTEMPTS = 2
+TJA_RESTORE_MRCC_MAX_TX_TOTAL = 20
 TJA_RESTORE_MRCC_MAX_UNIQUE_CTR = 1
+TJA_RESTORE_MRCC_MAX_UNIQUE_CTR_TOTAL = 2
 TJA_RESTORE_MRCC_MAX_DURATION_MS = 100  # one 10 Hz wheel period at 100 Hz TX
+TJA_RESTORE_RETRY_WINDOW_FRAMES = 50  # 500 ms panda window from TJA release
 # Compatibility names for startup LKAS tests that assert restore is not consumed.
 TJA_OFF_COMPENSATION_TIMEOUT_FRAMES = TJA_RESTORE_MRCC_TIMEOUT_FRAMES
 TJA_OFF_COMPENSATION_MAX_TX = TJA_RESTORE_MRCC_MAX_TX
+
+# Cadence-preserving HUD: OEM CAM_LANEINFO ~2 Hz (frame%50). Dirty-state
+# early send is allowed only at >=50 ms, then the next 2 Hz slot is phased
+# from that send so we never emit scheduled+10ms duplicate extras.
+HUD_CADENCE_FRAMES = 50
+HUD_MIN_INTERVAL_FRAMES = 5  # 50 ms at 100 Hz; OEM-safe vs FSC min ~19.7 ms
 
 
 def _crz_btns_held(CS) -> bool:
@@ -109,13 +120,19 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     self._tja_restore_mismatch_ctr = None
     self._tja_restore_wait_period = 0
     self._tja_restore_brake_at_edge = False
-    # Stage 2J: last packed OFF-restore HUD hold. Extra CAM_LANEINFO on
-    # assert/clear so TJA=0 is visible before restore TX and TJA=2 resumes
-    # without waiting for the 2 Hz slot. Not a timer.
+    self._tja_restore_attempts = 0
+    self._tja_restore_tx_total = 0
+    self._tja_restore_release_frame = None
+    # Stage 2M HUD scheduler. Extra CAM_LANEINFO only for an actual packed
+    # TJA / steerRequired change, at the earliest OEM-safe interval, then
+    # phase-reset the 2 Hz slot. Restore-hold assert/clear without a packed
+    # TJA change must not emit a duplicate 0x440.
     self._hud_off_restore_tja0_hold = False
-    # Last packed TJA. Extra CAM_LANEINFO when the Stage 2J desired value
-    # changes (OFF→ARMED TJA=2→0 must be on the bus before physical MRCC).
     self._hud_tja_last = None
+    self._hud_steer_required_last = None
+    self._hud_last_send_frame = -10 ** 9
+    self._hud_next_slot = None
+    self._hud_dirty = False
 
   def _hud_hold_tja0_for_off_restore(self, CC_SP) -> bool:
     """True while MADS is on and OFF-preservation restore is still unresolved.
@@ -159,6 +176,55 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     self._tja_restore_mismatch_ctr = None
     self._tja_restore_wait_period = 0
     self._tja_restore_brake_at_edge = False
+    self._tja_restore_attempts = 0
+    self._tja_restore_tx_total = 0
+    self._tja_restore_release_frame = None
+
+  def _fsc_lkas_unusable(self, CS) -> bool:
+    """True when FSC CAM_LKAS ERR bits say LKAS is unusable.
+
+    Fail-safe only. Does not clear or invent ERR bits. Does not mask the
+    cluster warning. Zeros torque so comma cannot keep requesting steer
+    after a real FSC error (Route 20 moving path).
+    """
+    cam = getattr(CS, "cam_lkas", None)
+    if not cam:
+      return False
+    try:
+      return bool(int(cam.get("ERR_BIT_1", 0)) or int(cam.get("ERR_BIT_2", 0)))
+    except (TypeError, ValueError):
+      return False
+
+  def _hud_should_send(self, packed_tja, steer_required) -> bool:
+    """Cadence-preserving dirty-state CAM_LANEINFO scheduler."""
+    payload_changed = (
+      (self._hud_tja_last is None) or
+      (packed_tja != self._hud_tja_last) or
+      (self._hud_steer_required_last is None) or
+      (bool(steer_required) != bool(self._hud_steer_required_last))
+    )
+    if payload_changed:
+      self._hud_dirty = True
+    delta = self.frame - self._hud_last_send_frame
+    min_ok = (delta >= HUD_MIN_INTERVAL_FRAMES) or (delta <= 0)
+    cadence_due = (self.frame % HUD_CADENCE_FRAMES) == 0
+    if cadence_due and (0 < delta < HUD_CADENCE_FRAMES):
+      # Early dirty send already covered this 2 Hz slot. Skip it.
+      cadence_due = False
+    if (self._hud_next_slot is not None) and (self.frame == self._hud_next_slot):
+      cadence_due = True
+    if self._hud_tja_last is None:
+      return bool(cadence_due)
+    if self._hud_dirty and min_ok:
+      return True
+    return bool(cadence_due and min_ok)
+
+  def _hud_mark_sent(self, packed_tja, steer_required):
+    self._hud_tja_last = packed_tja
+    self._hud_steer_required_last = bool(steer_required)
+    self._hud_last_send_frame = self.frame
+    self._hud_next_slot = self.frame + HUD_CADENCE_FRAMES
+    self._hud_dirty = False
 
   def _stop_tja_restore(self):
     self._tja_restore_target = None
@@ -219,12 +285,16 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
         if snap in ("OFF", "ARMED"):
           self._tja_restore_target = snap
           self._tja_restore_brake_at_edge = bool(CS.out.brakePressed)
+          self._tja_restore_release_frame = self.frame
 
     if CC.latActive and not self._tja_hold_zero:
       # calculate steer and also set limits due to driver torque
       new_torque = int(round(CC.actuators.torque * steer_max))
       apply_torque = apply_driver_steer_torque_limits(new_torque, self.apply_torque_last,
                                                       CS.out.steeringTorque, self.params, steer_max)
+
+    if self._fsc_lkas_unusable(CS):
+      apply_torque = 0
 
     virtual_resume_sent = False
     tja_off_comp = self._maybe_tja_off_compensation(CC, CS)
@@ -279,22 +349,19 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       desired_tja = 0
     else:
       desired_tja = 2
-    hud_due = (self.frame % 50 == 0) or (hold_tja0 != self._hud_off_restore_tja0_hold)
-    if self._hud_tja_last is not None and desired_tja != self._hud_tja_last:
-      hud_due = True
+    ldw = CC.hudControl.visualAlert == VisualAlert.ldw
+    steer_required = CC.hudControl.visualAlert == VisualAlert.steerRequired
+    # TODO: find a way to silence audible warnings so we can add more hud alerts
+    steer_required = steer_required and CS.lkas_allowed_speed
     self._hud_off_restore_tja0_hold = hold_tja0
-    if hud_due:
-      ldw = CC.hudControl.visualAlert == VisualAlert.ldw
-      steer_required = CC.hudControl.visualAlert == VisualAlert.steerRequired
-      # TODO: find a way to silence audible warnings so we can add more hud alerts
-      steer_required = steer_required and CS.lkas_allowed_speed
+    if self._hud_should_send(desired_tja, steer_required):
       # Presentation plumbing only. Reads existing cruiseState / MADS flags.
       # Does not create MRCC or MADS transitions.
       can_sends.append(mazdacan.create_alert_command(
         self.packer, CS.cam_laneinfo, ldw, steer_required,
         mrcc_active, mads_on, mrcc_armed,
         force_tja0=hold_tja0))
-      self._hud_tja_last = desired_tja
+      self._hud_mark_sent(desired_tja, steer_required)
 
     # send steering command
     can_sends.append(mazdacan.create_steering_control(self.packer, self.CP,
@@ -360,11 +427,34 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
         self._stop_tja_restore()
       return False
     # Mismatch: OFF target + ARMED now, or ARMED target + OFF now.
-    if self._tja_off_comp_tx >= TJA_RESTORE_MRCC_MAX_TX:
+    if self._tja_restore_tx_total >= TJA_RESTORE_MRCC_MAX_TX_TOTAL:
       self._stop_tja_restore()
       return False
     wheel_ctr = int(getattr(CS, "crz_btns_counter", 0)) % 16
-    if self._tja_restore_period_ctr is None:
+    if self._tja_restore_period_ctr is not None and wheel_ctr != self._tja_restore_period_ctr:
+      completed = self._tja_off_comp_tx
+      if 0 < completed < TJA_RESTORE_MRCC_MAX_TX:
+        self._tja_restore_attempts += 1
+      retry_ok = (
+        self._tja_restore_target == "OFF" and
+        self._tja_restore_attempts < TJA_RESTORE_MAX_ATTEMPTS and
+        current != self._tja_restore_target and
+        (self._tja_restore_release_frame is None or
+         (self.frame - self._tja_restore_release_frame) <= TJA_RESTORE_RETRY_WINDOW_FRAMES)
+      )
+      if not retry_ok:
+        self._stop_tja_restore()
+        return False
+      # Attempt #2: this sample is already the next physical wheel period.
+      self._tja_off_comp_tx = 0
+      self._tja_restore_ctrs = set()
+      self._tja_restore_period_ctr = wheel_ctr
+      self._tja_restore_locked_ctr = (wheel_ctr + 1) % 16
+      self._tja_restore_ctrs.add(self._tja_restore_locked_ctr)
+    elif self._tja_off_comp_tx >= TJA_RESTORE_MRCC_MAX_TX:
+      # Burst complete for this wheel period. Keep tx==MAX for tests.
+      return False
+    elif self._tja_restore_period_ctr is None:
       if self._tja_restore_mismatch_ctr is None:
         self._tja_restore_mismatch_ctr = wheel_ctr
         return False
@@ -375,17 +465,18 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       self._tja_restore_period_ctr = wheel_ctr
       self._tja_restore_locked_ctr = (wheel_ctr + 1) % 16
       self._tja_restore_ctrs.add(self._tja_restore_locked_ctr)
-    elif wheel_ctr != self._tja_restore_period_ctr:
-      # Next physical wheel frame would insert MRCC=0 and split the press.
-      self._stop_tja_restore()
-      return False
     if len(self._tja_restore_ctrs) > TJA_RESTORE_MRCC_MAX_UNIQUE_CTR:
       self._stop_tja_restore()
       return False
     self._tja_off_comp_tx += 1
+    self._tja_restore_tx_total += 1
     self._tja_off_comp_last_tx_frame = self.frame
     if self._tja_off_comp_tx >= TJA_RESTORE_MRCC_MAX_TX:
-      self._stop_tja_restore()
+      self._tja_restore_attempts += 1
+      if (self._tja_restore_target != "OFF" or
+          self._tja_restore_attempts >= TJA_RESTORE_MAX_ATTEMPTS or
+          self._tja_restore_tx_total >= TJA_RESTORE_MRCC_MAX_TX_TOTAL):
+        self._stop_tja_restore()
     return True
 
   def update_longitudinal(self, CC, CC_SP, CS, virtual_resume_sent):

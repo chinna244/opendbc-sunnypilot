@@ -56,7 +56,8 @@ def _controller(alpha_long):
   return cc
 
 
-def _cc(lat_active, cancel=False, resume=False, enabled=False, long_active=False):
+def _cc(lat_active, cancel=False, resume=False, enabled=False, long_active=False,
+        visual_alert=0):
   CC = structs.CarControl.new_message()
   CC.latActive = lat_active
   CC.enabled = enabled
@@ -64,13 +65,14 @@ def _cc(lat_active, cancel=False, resume=False, enabled=False, long_active=False
   CC.actuators.torque = 0.2 if lat_active else 0.0
   CC.cruiseControl.cancel = cancel
   CC.cruiseControl.resume = resume
+  CC.hudControl.visualAlert = visual_alert
   return CC.as_reader()
 
 
 def _cs(toggles=0, tja=0, available=False, enabled=False, standstill=False, brake=False,
         v_ego=10.0, set_p=0, set_m=0, res=0, cancel=0, mrcc=0,
         pre_available=False, pre_enabled=False, pre_unknown=False, tja_edge_reset=False,
-        crz_btns_counter=3, cam_laneinfo=None):
+        crz_btns_counter=3, cam_laneinfo=None, cam_lkas=None):
   out = SimpleNamespace(
     vEgoRaw=v_ego, steeringTorque=0, brakePressed=brake, standstill=standstill,
     gasPressed=False,
@@ -79,7 +81,8 @@ def _cs(toggles=0, tja=0, available=False, enabled=False, standstill=False, brak
   return SimpleNamespace(
     out=out, tja_toggles_this_update=toggles, tja_button=tja, crz_btns_counter=crz_btns_counter,
     cancel_button=cancel, accel_button=set_p, decel_button=set_m, resume_button=res,
-    main_button=mrcc, lkas_allowed_speed=True, cam_lkas=CAM_LKAS_STOCK,
+    main_button=mrcc, lkas_allowed_speed=True,
+    cam_lkas=CAM_LKAS_STOCK if cam_lkas is None else cam_lkas,
     cam_laneinfo=CAM_LANEINFO if cam_laneinfo is None else cam_laneinfo,
     stock_radar_alive=False, fsc_settled=True,
     tja_pre_cruise_available=pre_available, tja_pre_cruise_enabled=pre_enabled,
@@ -150,7 +153,8 @@ def _step(ctrl, lat, **kw):
   _, sends = ctrl.update(_cc(lat, cancel=kw.pop("op_cancel", False),
                              resume=kw.pop("resume", False),
                              enabled=kw.pop("cc_enabled", False),
-                             long_active=kw.pop("long_active", False)),
+                             long_active=kw.pop("long_active", False),
+                             visual_alert=kw.pop("visual_alert", 0)),
                          CC_SP, _cs(**kw), 0)
   return _decode_crz(sends), sends
 
@@ -574,7 +578,11 @@ class TestTjaMadsOnlyIndependence(unittest.TestCase):
     assert crz == []
 
   def test_interval_contained_ctr_is_one_logical_press(self, alpha_long):
-    """Route 00000019: spanning a wheel idle is a second press. Stay in one period."""
+    """Route 00000019: spanning a wheel idle is a second press. Stay in one period.
+
+    Stage 2M: a second period is allowed only as restore attempt #2 while still
+    ARMED. That second burst still uses one locked CTR. A third period is rejected.
+    """
     ctrl = _controller(alpha_long)
     crz, _ = _tja_press_then_restore(ctrl, True, tja=0, available=True, enabled=False,
                                      crz_btns_counter=3)
@@ -588,6 +596,16 @@ class TestTjaMadsOnlyIndependence(unittest.TestCase):
       packed.add(crz[0]["CTR"])
     assert len(packed) == TJA_RESTORE_MRCC_MAX_UNIQUE_CTR
     crz, _ = _step(ctrl, True, available=True, enabled=False, crz_btns_counter=5)
+    _assert_clean_mrcc(crz)
+    packed2 = {crz[0]["CTR"]}
+    for _ in range(8):
+      crz, _ = _step(ctrl, True, available=True, enabled=False, crz_btns_counter=5)
+      if not crz:
+        break
+      _assert_clean_mrcc(crz)
+      packed2.add(crz[0]["CTR"])
+    assert len(packed2) == TJA_RESTORE_MRCC_MAX_UNIQUE_CTR
+    crz, _ = _step(ctrl, True, available=True, enabled=False, crz_btns_counter=6)
     assert crz == []
 
   def test_route_00000018_all_32_tja_final_state(self, alpha_long):
@@ -1041,7 +1059,14 @@ class TestTjaMadsOnlyIndependence(unittest.TestCase):
               fails.append((eid, "multigesture", packed_one))
             crz2, _ = _step(ctrl, expected_mads, available=hist_av, enabled=hist_en,
                             crz_btns_counter=5)
-            if crz2:
+            if pre_mrcc == "OFF":
+              if crz2:
+                _assert_clean_mrcc(crz2)
+              crz3, _ = _step(ctrl, expected_mads, available=hist_av, enabled=hist_en,
+                              crz_btns_counter=6)
+              if crz3:
+                fails.append((eid, "third_logical_press", crz3))
+            elif crz2:
               fails.append((eid, "second_logical_press", crz2))
           actual = pre_mrcc
           crz, _ = _step(ctrl, expected_mads,

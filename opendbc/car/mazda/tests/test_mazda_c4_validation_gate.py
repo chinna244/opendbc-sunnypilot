@@ -18,7 +18,9 @@ from opendbc.car.mazda.tests.unittest_compat import parametrize
 
 from opendbc.car.mazda.carcontroller import (
   TJA_RESTORE_MRCC_MAX_TX,
+  TJA_RESTORE_MRCC_MAX_TX_TOTAL,
   TJA_RESTORE_MRCC_MAX_UNIQUE_CTR,
+  TJA_RESTORE_MRCC_MAX_UNIQUE_CTR_TOTAL,
 )
 from opendbc.car.mazda.mazdacan import create_alert_command
 from opendbc.car.mazda.tja_edge import MazdaTjaEdge
@@ -227,9 +229,9 @@ def _replay_tja_event(ev, alpha_long):
     fail.append("active_mrcc")
   if pre_mrcc == "UNKNOWN" and any(synth.values()):
     fail.append("unknown_synth")
-  if synth["MRCC"] and len(unique_ctrs) > TJA_RESTORE_MRCC_MAX_UNIQUE_CTR:
+  if synth["MRCC"] and len(unique_ctrs) > TJA_RESTORE_MRCC_MAX_UNIQUE_CTR_TOTAL:
     fail.append("multigesture")
-  if synth["MRCC"] > TJA_RESTORE_MRCC_MAX_TX:
+  if synth["MRCC"] > TJA_RESTORE_MRCC_MAX_TX_TOTAL:
     fail.append("unbounded")
   _, steer_sends = _step(ctrl, lat, **{k: kw[k] for k in kw if k in (
     "available", "enabled", "pre_available", "pre_enabled", "pre_unknown",
@@ -520,6 +522,10 @@ class TestCrzCounterPhase(unittest.TestCase):
         next_ctr = _next_wheel_ctr(period)
         crz, _ = _step(ctrl, True, available=True, enabled=False, crz_btns_counter=next_ctr)
         if crz:
+          _assert_clean_mrcc(crz)
+        third_ctr = _next_wheel_ctr(next_ctr)
+        crz, _ = _step(ctrl, True, available=True, enabled=False, crz_btns_counter=third_ctr)
+        if crz:
           multigesture += 1
         if start_ctr == 15:
           ctrl = _controller(alpha_long)
@@ -533,6 +539,9 @@ class TestCrzCounterPhase(unittest.TestCase):
             if crz[0]["CTR"] != locked:
               rollover += 1
           crz, _ = _step(ctrl, True, available=True, enabled=False, crz_btns_counter=1)
+          if crz:
+            _assert_clean_mrcc(crz)
+          crz, _ = _step(ctrl, True, available=True, enabled=False, crz_btns_counter=2)
           if crz:
             rollover += 1
         ctrl = _controller(alpha_long)
@@ -549,12 +558,7 @@ class TestCrzCounterPhase(unittest.TestCase):
           fails += 1
         if extra_tx > TJA_RESTORE_MRCC_MAX_TX:
           fails += 1
-    assert fails == 0
-    assert collisions == 0
-    assert rollover == 0
-    assert multigesture == 0
-    assert rollover == 0
-    assert multigesture == 0
+    assert (fails, collisions, rollover, multigesture) == (0, 0, 0, 0)
 
 
 class TestCamLaneinfoExhaustive(unittest.TestCase):

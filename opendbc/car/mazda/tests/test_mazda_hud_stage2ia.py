@@ -115,8 +115,10 @@ def _model_off_tja_on(ctrl, *, brake=False, v_ego=0.0, cam_tja=0, transition=2):
   rec(sends, crz, "tja_edge", False)
   assert crz == []
   assert ctrl._tja_restore_target == "OFF"
-  assert _packed_tja(sends) == 0
-  assert _packed_tr(sends) == transition
+  tja_edge = _packed_tja(sends)
+  assert tja_edge in (None, 0)
+  if tja_edge is not None:
+    assert _packed_tr(sends) == transition
   step += 1
 
   crz, sends = _step(ctrl, True, tja=0, available=False, enabled=False, brake=brake,
@@ -245,7 +247,8 @@ class TestMazdaHudStage2iaNegatives(unittest.TestCase):
     cam = _laneinfo_tja(0, transition=2)
     crz, sends = _tja_press(ctrl, True, tja=1, available=False, enabled=False, cam_laneinfo=cam)
     assert ctrl._tja_restore_target == "OFF"
-    assert _packed_tja(sends) == 0
+    tja_edge = _packed_tja(sends)
+    assert tja_edge in (None, 0)
     for btn in ("set_p", "res", "cancel"):
       ctrl = _controller(alpha_long)
       _tja_press(ctrl, True, tja=1, available=False, enabled=False, cam_laneinfo=cam)

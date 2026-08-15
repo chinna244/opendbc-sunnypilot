@@ -276,13 +276,15 @@ class TestMazdaRestoreSafety(unittest.TestCase):
     self._rx(self._crz_ctrl(True))
     self.assertFalse(self._tx(self._btns(mrcc=1, ctr=4)))
 
-  def test_restore_accepted_then_next_wheel_closes(self):
+  def test_restore_accepted_then_next_wheel_allows_one_retry(self):
     self._open_off_window()
     self.assertTrue(self._tx(self._btns(mrcc=1, ctr=4)))
     self._rx(self._btns(ctr=3))
     self.assertTrue(self._tx(self._btns(mrcc=1, ctr=4)))
     self._rx(self._btns(ctr=4))
-    self.assertFalse(self._tx(self._btns(mrcc=1, ctr=4)))
+    self.assertTrue(self._tx(self._btns(mrcc=1, ctr=5)))
+    self._rx(self._btns(ctr=5))
+    self.assertFalse(self._tx(self._btns(mrcc=1, ctr=6)))
 
   def test_second_unique_ctr_rejected(self):
     self._open_off_window()
@@ -301,6 +303,46 @@ class TestMazdaRestoreSafety(unittest.TestCase):
     for _ in range(10):
       self.assertTrue(self._tx(self._btns(mrcc=1, ctr=4)))
     self.assertFalse(self._tx(self._btns(mrcc=1, ctr=4)))
+
+  def test_second_period_then_third_rejected(self):
+    self._open_off_window()
+    for _ in range(10):
+      self.assertTrue(self._tx(self._btns(mrcc=1, ctr=4)))
+    self.assertFalse(self._tx(self._btns(mrcc=1, ctr=4)))
+    self._rx(self._btns(ctr=4))
+    for _ in range(10):
+      self.assertTrue(self._tx(self._btns(mrcc=1, ctr=5)))
+    self.assertFalse(self._tx(self._btns(mrcc=1, ctr=5)))
+    self._rx(self._btns(ctr=5))
+    self.assertFalse(self._tx(self._btns(mrcc=1, ctr=6)))
+
+  def test_late_ack_cancels_retry(self):
+    self._open_off_window()
+    self.assertTrue(self._tx(self._btns(mrcc=1, ctr=4)))
+    self._rx(self._crz_ctrl(False))
+    self._rx(self._btns(ctr=4))
+    self.assertFalse(self._tx(self._btns(mrcc=1, ctr=5)))
+
+  def test_timeout_rejects_retry_after_first_period(self):
+    self._open_off_window()
+    self.assertTrue(self._tx(self._btns(mrcc=1, ctr=4)))
+    self.safety.set_timer(10000 + 500001)
+    self._rx(self._btns(ctr=4))
+    self.assertFalse(self._tx(self._btns(mrcc=1, ctr=5)))
+
+  def test_driver_mrcc_cancels_retry(self):
+    self._open_off_window()
+    self.assertTrue(self._tx(self._btns(mrcc=1, ctr=4)))
+    self._rx(self._btns(mrcc=1, ctr=3))
+    self._rx(self._btns(ctr=4))
+    self.assertFalse(self._tx(self._btns(mrcc=1, ctr=5)))
+
+  def test_new_tja_cancels_retry(self):
+    self._open_off_window()
+    self.assertTrue(self._tx(self._btns(mrcc=1, ctr=4)))
+    self.safety.set_mazda_tja_edge_state(0)
+    self._rx(self._btns(tja=1, ctr=3))
+    self.assertFalse(self._tx(self._btns(mrcc=1, ctr=5)))
 
   def test_timeout_rejected(self):
     self._open_off_window()

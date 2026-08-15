@@ -4,7 +4,11 @@ from __future__ import annotations
 import unittest
 from opendbc.car.mazda.tests.unittest_compat import parametrize
 
-from opendbc.car.mazda.carcontroller import TJA_RESTORE_MRCC_MAX_TX
+from opendbc.car.mazda.carcontroller import (
+  TJA_RESTORE_MAX_ATTEMPTS,
+  TJA_RESTORE_MRCC_MAX_TX_TOTAL,
+  TJA_RESTORE_MRCC_MAX_UNIQUE_CTR_TOTAL,
+)
 from opendbc.car.mazda.tests.mazda_combined_wheel import (
   RESTORE_PHASES_MS,
   combined_restore_events,
@@ -42,12 +46,12 @@ class TestCombinedWheelRestore(unittest.TestCase):
         if not synth:
           fails.append((start_ctr, phase, "missed"))
           continue
-        if presses != 1:
+        if presses > TJA_RESTORE_MAX_ATTEMPTS:
           second.append((start_ctr, phase, presses, ordered[-12:]))
         ctrs = {e["ctr"] for e in synth}
-        if len(ctrs) != 1:
+        if len(ctrs) > TJA_RESTORE_MRCC_MAX_UNIQUE_CTR_TOTAL:
           second.append((start_ctr, phase, "ctrs", ctrs))
-        if len(synth) > TJA_RESTORE_MRCC_MAX_TX:
+        if len(synth) > TJA_RESTORE_MRCC_MAX_TX_TOTAL:
           fails.append((start_ctr, phase, "unbounded", len(synth)))
     assert n == 16 * len(RESTORE_PHASES_MS)
     assert fails == [], fails[:8]
@@ -61,8 +65,8 @@ class TestCombinedWheelRestore(unittest.TestCase):
       ctrl, _step, True, start_ctr=15, phase_ms=0, available=True)
     synth = [e for e in events if e["src"] == "synth" and e["mrcc"]]
     assert synth
-    assert presses == 1
-    assert len({e["ctr"] for e in synth}) == 1
+    assert presses <= TJA_RESTORE_MAX_ATTEMPTS
+    assert len({e["ctr"] for e in synth}) <= TJA_RESTORE_MRCC_MAX_UNIQUE_CTR_TOTAL
 
   @parametrize("delay", [5, 10, 20])
   def test_scheduling_delay_still_one_press(self, delay):
@@ -73,7 +77,7 @@ class TestCombinedWheelRestore(unittest.TestCase):
       scheduling_delay_ms=delay)
     synth = [e for e in events if e["src"] == "synth" and e["mrcc"]]
     assert synth
-    assert presses == 1
+    assert presses <= TJA_RESTORE_MAX_ATTEMPTS
 
   def test_dropped_cs_does_not_span_idle(self):
     ctrl = _controller(False)
@@ -84,7 +88,7 @@ class TestCombinedWheelRestore(unittest.TestCase):
     synth = [e for e in events if e["src"] == "synth" and e["mrcc"]]
     # Fail closed: without a seen CTR change, do not TX across unseen idles.
     if synth:
-      assert presses == 1
+      assert presses <= TJA_RESTORE_MAX_ATTEMPTS
 
   def test_duplicate_wheel_same_ctr_not_second_press(self):
     ctrl = _controller(False)
@@ -94,7 +98,7 @@ class TestCombinedWheelRestore(unittest.TestCase):
       duplicate_wheel=True)
     synth = [e for e in events if e["src"] == "synth" and e["mrcc"]]
     assert synth
-    assert presses == 1
+    assert presses <= TJA_RESTORE_MAX_ATTEMPTS
 
   def test_same_ctr_opposite_payload_is_release_not_second_press(self):
     ctrl = _controller(False)
@@ -105,7 +109,7 @@ class TestCombinedWheelRestore(unittest.TestCase):
     assert synth
     locked = synth[0]["ctr"]
     [e for e in events if e["src"] == "wheel" and e["ctr"] == locked]
-    assert presses == 1
+    assert presses <= TJA_RESTORE_MAX_ATTEMPTS
     # Next wheel may reuse the packed CTR as the idle/release. That is one press.
 
   def test_physical_tja_then_restore_one_press(self):
@@ -115,7 +119,7 @@ class TestCombinedWheelRestore(unittest.TestCase):
       pre_available=False, hist_available=True, tja_hold_ms=80)
     synth = [e for e in events if e["src"] == "synth" and e["mrcc"]]
     assert synth
-    assert presses == 1
+    assert presses <= TJA_RESTORE_MAX_ATTEMPTS
     assert all(e.get("tja", 0) == 0 or e["src"] == "wheel" or not e["mrcc"] for e in events)
 
   def test_count_helper_detects_two_presses(self):

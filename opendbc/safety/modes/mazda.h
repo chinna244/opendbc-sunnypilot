@@ -39,19 +39,22 @@
 
 // Per-edge MRCC restore. Physical TJA toggles MADS only. OEM TJA_BUTTON may
 // also flip cruise OFF↔ARMED. After TJA release, if the post-TJA cruise state
-// differs from the confident pre-edge snapshot, allow one bounded clean
+// differs from the confident pre-edge snapshot, allow a bounded clean
 // MRCC_BUTTON gesture to restore that snapshot.
 //
-// One logical press on the combined wheel+synth stream: fill a single 10 Hz
-// wheel period with one locked CTR, then stop. Spanning a wheel idle is a
-// second press (route 00000019). Panda independently closes the window when
-// a later physical wheel CTR arrives after restore TX has started.
-// Pre-ACTIVE / UNKNOWN never authorize. Lateral (MADS) does not gate.
+// Stage 2M: at most TWO logical presses, each filling one 10 Hz wheel period
+// with one locked CTR. Attempt #2 is only the next physical wheel period of
+// the SAME TJA transaction, only while still mismatched, only inside 500 ms
+// of TJA release. A third period / CTR / attempt is rejected. Spanning a
+// wheel idle inside one attempt is a second press (route 00000019) and is
+// still rejected. Pre-ACTIVE / UNKNOWN never authorize. Lateral does not gate.
 #define MAZDA_RESTORE_NONE 0U
 #define MAZDA_RESTORE_OFF 1U
 #define MAZDA_RESTORE_ARMED 2U
 #define MAZDA_RESTORE_WINDOW_US 500000U
 #define MAZDA_RESTORE_MRCC_MAX_TX 10U
+#define MAZDA_RESTORE_MAX_ATTEMPTS 2U
+#define MAZDA_RESTORE_MRCC_MAX_TX_TOTAL 20U
 #define MAZDA_RESTORE_CTR_UNSET 0xFFU
 
 typedef enum {
@@ -68,23 +71,54 @@ static uint8_t mazda_restore_target = MAZDA_RESTORE_NONE;
 static bool mazda_restore_released = false;
 static bool mazda_restore_seen_mismatch = false;
 static uint8_t mazda_restore_tx = 0;
+static uint8_t mazda_restore_tx_total = 0;
+static uint8_t mazda_restore_attempts = 0;
 static uint32_t mazda_restore_ts = 0;
 static uint8_t mazda_restore_ctr = MAZDA_RESTORE_CTR_UNSET;
 static uint8_t mazda_last_rx_ctr = MAZDA_RESTORE_CTR_UNSET;
 static uint8_t mazda_restore_period_ctr = MAZDA_RESTORE_CTR_UNSET;
+static bool mazda_restore_need_new_period = false;
 
 static void mazda_tja_edge_reset(void) {
   mazda_tja_edge_state = MAZDA_TJA_UNINITIALIZED;
 }
+
+static bool mazda_restore_mismatch(void);
 
 static void mazda_restore_reset(void) {
   mazda_restore_target = MAZDA_RESTORE_NONE;
   mazda_restore_released = false;
   mazda_restore_seen_mismatch = false;
   mazda_restore_tx = 0;
+  mazda_restore_tx_total = 0;
+  mazda_restore_attempts = 0;
   mazda_restore_ts = 0;
   mazda_restore_ctr = MAZDA_RESTORE_CTR_UNSET;
   mazda_restore_period_ctr = MAZDA_RESTORE_CTR_UNSET;
+  mazda_restore_need_new_period = false;
+}
+
+static bool mazda_restore_window_time_ok(void) {
+  const uint32_t elapsed = safety_get_ts_elapsed(microsecond_timer_get(), mazda_restore_ts);
+  return elapsed <= MAZDA_RESTORE_WINDOW_US;
+}
+
+// Finish the current logical press. Attempt #2 stays armed only for the same
+// TJA transaction, still-mismatched OEM state, and open 500 ms window, and
+// only after the next physical wheel period.
+static void mazda_restore_end_attempt(void) {
+  mazda_restore_attempts += 1U;
+  mazda_restore_tx = 0;
+  mazda_restore_ctr = MAZDA_RESTORE_CTR_UNSET;
+  mazda_restore_need_new_period = true;
+  if ((mazda_restore_attempts >= MAZDA_RESTORE_MAX_ATTEMPTS) ||
+      (mazda_restore_tx_total >= MAZDA_RESTORE_MRCC_MAX_TX_TOTAL) ||
+      !mazda_restore_released ||
+      (mazda_restore_target == MAZDA_RESTORE_NONE) ||
+      !mazda_restore_mismatch() ||
+      !mazda_restore_window_time_ok()) {
+    mazda_restore_reset();
+  }
 }
 
 static bool mazda_crz_btns_restore_mrcc(const CANPacket_t *msg) {
@@ -129,17 +163,20 @@ static bool mazda_restore_window_open(void) {
   if (!mazda_tja_button || (mazda_restore_target == MAZDA_RESTORE_NONE) ||
       !mazda_restore_released || !mazda_restore_mismatch()) {
     open = false;
-  } else if (mazda_restore_tx >= MAZDA_RESTORE_MRCC_MAX_TX) {
+  } else if ((mazda_restore_attempts >= MAZDA_RESTORE_MAX_ATTEMPTS) ||
+             (mazda_restore_tx_total >= MAZDA_RESTORE_MRCC_MAX_TX_TOTAL)) {
     mazda_restore_reset();
     open = false;
+  } else if (mazda_restore_tx >= MAZDA_RESTORE_MRCC_MAX_TX) {
+    mazda_restore_end_attempt();
+    open = false;
+  } else if (!mazda_restore_window_time_ok()) {
+    mazda_restore_reset();
+    open = false;
+  } else if (mazda_restore_need_new_period) {
+    open = false;
   } else {
-    const uint32_t elapsed = safety_get_ts_elapsed(microsecond_timer_get(), mazda_restore_ts);
-    if (elapsed > MAZDA_RESTORE_WINDOW_US) {
-      mazda_restore_reset();
-      open = false;
-    } else {
-      open = true;
-    }
+    open = true;
   }
   return open;
 }
@@ -312,11 +349,25 @@ static void mazda_rx_hook(const CANPacket_t *msg) {
         mazda_restore_reset();
       }
       // Physical wheel idle on a new CTR after restore TX is the logical
-      // release. Further synthetic MRCC would be press→release→press.
+      // release of this attempt. Attempt #2 may use that next period of the
+      // same TJA transaction; a third period is rejected.
+      if (mazda_restore_need_new_period && !tja_pressed && !driver_long &&
+          (mazda_restore_period_ctr != MAZDA_RESTORE_CTR_UNSET) &&
+          (rx_ctr != mazda_restore_period_ctr)) {
+        mazda_restore_need_new_period = false;
+        mazda_restore_period_ctr = MAZDA_RESTORE_CTR_UNSET;
+        mazda_restore_ctr = MAZDA_RESTORE_CTR_UNSET;
+      }
       if ((mazda_restore_tx > 0U) && !tja_pressed && !driver_long &&
           (mazda_restore_period_ctr != MAZDA_RESTORE_CTR_UNSET) &&
           (rx_ctr != mazda_restore_period_ctr)) {
-        mazda_restore_reset();
+        mazda_restore_end_attempt();
+        if (mazda_restore_target != MAZDA_RESTORE_NONE) {
+          // This RX sample is already the next physical period.
+          mazda_restore_need_new_period = false;
+          mazda_restore_period_ctr = MAZDA_RESTORE_CTR_UNSET;
+          mazda_restore_ctr = MAZDA_RESTORE_CTR_UNSET;
+        }
       }
     }
 
@@ -472,8 +523,10 @@ static bool mazda_tx_hook(const CANPacket_t *msg) {
             mazda_restore_period_ctr = mazda_last_rx_ctr;
           }
           mazda_restore_tx += 1U;
-          if (mazda_restore_tx >= MAZDA_RESTORE_MRCC_MAX_TX) {
-            mazda_restore_reset();
+          mazda_restore_tx_total += 1U;
+          if ((mazda_restore_tx >= MAZDA_RESTORE_MRCC_MAX_TX) ||
+              (mazda_restore_tx_total >= MAZDA_RESTORE_MRCC_MAX_TX_TOTAL)) {
+            mazda_restore_end_attempt();
           }
         }
       }
@@ -564,7 +617,12 @@ void set_mazda_restore_debug(uint8_t target, bool released, uint8_t tx) {
   mazda_restore_target = target;
   mazda_restore_released = released;
   mazda_restore_tx = tx;
+  mazda_restore_tx_total = tx;
+  mazda_restore_attempts = 0;
+  mazda_restore_need_new_period = false;
   mazda_restore_ts = microsecond_timer_get();
   mazda_restore_seen_mismatch = true;
+  mazda_restore_ctr = MAZDA_RESTORE_CTR_UNSET;
+  mazda_restore_period_ctr = MAZDA_RESTORE_CTR_UNSET;
 }
 #endif
