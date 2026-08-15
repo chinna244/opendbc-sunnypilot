@@ -75,6 +75,7 @@ def _cc_lat(torque=0.4, lat_active=True):
 def _cc_sp():
   return SimpleNamespace(
     stockEcuHandBack=False,
+    mads=SimpleNamespace(enabled=True),
     intelligentCruiseButtonManagement=SimpleNamespace(sendButton=SendButtonState.none, state=0, vTarget=0),
   )
 

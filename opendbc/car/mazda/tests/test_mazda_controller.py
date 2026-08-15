@@ -734,3 +734,119 @@ class TestMazdaHudStage2aMadsOff(unittest.TestCase):
     assert vl["TJA_TRANSITION"] == 2
     for s in self.COPIED:
       assert vl[s] == cam[s], s
+
+
+class TestMazdaHudStage2bArmedWhite(unittest.TestCase):
+  """MADS ON + MRCC ARMED forces bus-0 TJA=2. OFF/ACTIVE/MADS-off unchanged."""
+
+  COPIED = TestMazdaHudStage2aMadsOff.COPIED
+
+  def _parser(self):
+    parser = CANParser("mazda_2017", [("CAM_LANEINFO", 0)], 0)
+    for st in parser.message_states.values():
+      st.ignore_checksum = True
+      st.ignore_counter = True
+      st.ignore_alive = True
+    return parser
+
+  def _cam(self, tja, transition=2, lane_lines=3):
+    cam = {s: 0 for s in self.COPIED}
+    cam["TJA"] = tja
+    cam["TJA_TRANSITION"] = transition
+    cam["LANE_LINES"] = lane_lines
+    cam["LINE_VISIBLE"] = 1
+    cam["BIT1"] = 1
+    return cam
+
+  def _pack(self, parser, cam, *, mrcc_active, mads_enabled, mrcc_armed=False):
+    packer = CANPacker("mazda_2017")
+    msg = mazdacan.create_alert_command(
+      packer, cam, False, False, mrcc_active=mrcc_active, mads_enabled=mads_enabled,
+      mrcc_armed=mrcc_armed)
+    parser.update([(0, [msg])])
+    return parser.vl["CAM_LANEINFO"]
+
+  def test_mads_off_mrcc_off_fsc0(self):
+    vl = self._pack(self._parser(), self._cam(0, 0, 1), mrcc_active=False, mads_enabled=False)
+    assert vl["TJA"] == 0
+    assert vl["TJA_TRANSITION"] == 0
+
+  def test_mads_off_mrcc_off_fsc2(self):
+    vl = self._pack(self._parser(), self._cam(2), mrcc_active=False, mads_enabled=False)
+    assert vl["TJA"] == 0
+    assert vl["TJA_TRANSITION"] == 2
+
+  def test_mads_off_armed_fsc0(self):
+    vl = self._pack(self._parser(), self._cam(0, 2, 1), mrcc_active=False, mads_enabled=False,
+                    mrcc_armed=True)
+    assert vl["TJA"] == 0
+    assert vl["TJA_TRANSITION"] == 2
+
+  def test_mads_off_armed_fsc2(self):
+    vl = self._pack(self._parser(), self._cam(2), mrcc_active=False, mads_enabled=False,
+                    mrcc_armed=True)
+    assert vl["TJA"] == 0
+    assert vl["TJA_TRANSITION"] == 2
+
+  def test_mads_on_off_fsc0_does_not_invent_tja2(self):
+    vl = self._pack(self._parser(), self._cam(0, 2, 1), mrcc_active=False, mads_enabled=True)
+    assert vl["TJA"] == 0
+    assert vl["TJA_TRANSITION"] == 2
+
+  def test_mads_on_off_fsc2_preserves_stage2a(self):
+    vl = self._pack(self._parser(), self._cam(2), mrcc_active=False, mads_enabled=True)
+    assert vl["TJA"] == 2
+    assert vl["TJA_TRANSITION"] == 2
+
+  def test_mads_on_armed_fsc0_outputs_2(self):
+    vl = self._pack(self._parser(), self._cam(0, 2, 1), mrcc_active=False, mads_enabled=True,
+                    mrcc_armed=True)
+    assert vl["TJA"] == 2
+    assert vl["TJA_TRANSITION"] == 2
+
+  def test_mads_on_armed_fsc2_outputs_2(self):
+    vl = self._pack(self._parser(), self._cam(2), mrcc_active=False, mads_enabled=True,
+                    mrcc_armed=True)
+    assert vl["TJA"] == 2
+    assert vl["TJA_TRANSITION"] == 2
+
+  def test_mads_on_armed_fsc3_outputs_2_not_3(self):
+    vl = self._pack(self._parser(), self._cam(3), mrcc_active=False, mads_enabled=True,
+                    mrcc_armed=True)
+    assert vl["TJA"] == 2
+    assert vl["TJA_TRANSITION"] == 2
+
+  def test_mads_on_armed_fsc4_outputs_2_not_4(self):
+    vl = self._pack(self._parser(), self._cam(4), mrcc_active=False, mads_enabled=True,
+                    mrcc_armed=True)
+    assert vl["TJA"] == 2
+    assert vl["TJA_TRANSITION"] == 2
+
+  def test_mads_on_active_fsc0(self):
+    vl = self._pack(self._parser(), self._cam(0, 0, 1), mrcc_active=True, mads_enabled=True,
+                    mrcc_armed=True)
+    assert vl["TJA"] == 0
+    assert vl["TJA_TRANSITION"] == 0
+
+  def test_mads_on_active_clamp_2_3_4(self):
+    for tja in (2, 3, 4):
+      vl = self._pack(self._parser(), self._cam(tja), mrcc_active=True, mads_enabled=True,
+                      mrcc_armed=True)
+      assert vl["TJA"] == 0, tja
+      assert vl["TJA_TRANSITION"] == 2
+
+  def test_mads_off_active_clamp_2_3_4(self):
+    for tja in (2, 3, 4):
+      vl = self._pack(self._parser(), self._cam(tja), mrcc_active=True, mads_enabled=False,
+                      mrcc_armed=True)
+      assert vl["TJA"] == 0, tja
+      assert vl["TJA_TRANSITION"] == 2
+
+  def test_transition_and_copied_fields_unchanged(self):
+    cam = self._cam(3, transition=2, lane_lines=3)
+    vl = self._pack(self._parser(), cam, mrcc_active=False, mads_enabled=True, mrcc_armed=True)
+    assert vl["TJA"] == 2
+    assert vl["TJA_TRANSITION"] == 2
+    for s in self.COPIED:
+      assert vl[s] == cam[s], s
+

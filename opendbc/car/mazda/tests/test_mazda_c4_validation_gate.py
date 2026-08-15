@@ -576,6 +576,8 @@ class TestCamLaneinfoExhaustive(unittest.TestCase):
               expected = 0
             elif mrcc == "ACTIVE":
               expected = 0 if tja in (2, 3, 4) else tja
+            elif mrcc == "ARMED":
+              expected = 2
             else:
               expected = tja
             if packed != expected:
@@ -588,7 +590,8 @@ class TestCamLaneinfoExhaustive(unittest.TestCase):
               invalid += 1
             # packer-level clamp matches controller
             msg = create_alert_command(packer, cam, False, False,
-                                       mrcc_active=(mrcc == "ACTIVE"), mads_enabled=mads)
+                                       mrcc_active=(mrcc == "ACTIVE"), mads_enabled=mads,
+                                       mrcc_armed=(mrcc == "ARMED"))
             assert msg[0] == 0x440
     assert tja2_active == 0
     assert invalid == 0

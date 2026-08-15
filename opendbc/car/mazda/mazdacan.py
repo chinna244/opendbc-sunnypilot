@@ -141,7 +141,8 @@ def create_steering_control(packer, CP, frame, apply_torque, lkas):
 
 
 def create_alert_command(packer, cam_msg: dict, ldw: bool, steer_required: bool,
-                         mrcc_active: bool = False, mads_enabled: bool = True):
+                         mrcc_active: bool = False, mads_enabled: bool = True,
+                         mrcc_armed: bool = False):
   values = {s: cam_msg[s] for s in [
     "LINE_VISIBLE",
     "LINE_NOT_VISIBLE",
@@ -164,22 +165,25 @@ def create_alert_command(packer, cam_msg: dict, ldw: bool, steer_required: bool,
     "LDW_WARN_LL": 0,
     "LDW_WARN_RL": 0,
   })
-  # Preserve camera TJA / TJA_TRANSITION when present. Do not invent TJA from MADS-on.
+  # Preserve camera TJA / TJA_TRANSITION when present. Do not invent TJA from
+  # MADS-on while MRCC is OFF. Leave TJA_TRANSITION / LANE_LINES / other HUD
+  # fields unchanged except the TJA state-gate below.
   for sig in ("TJA", "TJA_TRANSITION"):
     if sig in cam_msg:
       values[sig] = cam_msg[sig]
-  # Functional MRCC preservation, not HUD matching. Route 00000019 events 24/40/43/46:
-  # comma TX CAM_LANEINFO.TJA=3 while CRZ_ACTIVE, then physical TJA FULL-OFF and
-  # cleared set speed. TJA=2 was already clamped; 08 20 was not latched (b4=0x30).
-  # Event 28 kept ACTIVE with TJA=0. Never pack 2/3/4 while ACTIVE. Leave
-  # TJA_TRANSITION / LANE_LINES / other HUD fields unchanged.
-  if mrcc_active and int(values.get("TJA", 0) or 0) in (2, 3, 4):
-    values["TJA"] = 0
-  # Stage 2A HUD ownership. MADS disabled must not present OEM TJA on bus 0.
-  # Event 38: MADS OFF + MRCC ARMED copied FSC TJA=2 for ~4.3s. Do not map
-  # MADS-on / latActive onto TJA=2/3/4, and do not rewrite TJA_TRANSITION.
+  # Presentation-only TJA gate. Does not create cruise state.
+  #   MADS disabled → 0 (Stage 2A Event 38)
+  #   MRCC ACTIVE + TJA in {2,3,4} → 0 (Route 00000019)
+  #   MADS enabled + MRCC ARMED → 2 (Stage 2B white standby). Force 2 so FSC
+  #     3/4 cannot leak an OEM-engaged value while ARMED.
+  #   MRCC OFF → keep copied FSC TJA. Do not invent 2; moving OFF is unproven.
   if not mads_enabled:
     values["TJA"] = 0
+  elif mrcc_active:
+    if int(values.get("TJA", 0) or 0) in (2, 3, 4):
+      values["TJA"] = 0
+  elif mrcc_armed:
+    values["TJA"] = 2
   return packer.make_can_msg("CAM_LANEINFO", 0, values)
 
 

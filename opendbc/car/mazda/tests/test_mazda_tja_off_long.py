@@ -33,6 +33,9 @@ from opendbc.car.mazda.interface import CarInterface
 from opendbc.car.mazda.values import CAR
 
 CRZ_BTNS = 0x09D
+CRZ_INFO = 0x21B
+CRZ_CTRL = 0x21C
+CRZ_EVENTS = 0x21F
 CAM_LKAS = 0x243
 CAM_LANEINFO_ADDR = 0x440
 
@@ -733,6 +736,145 @@ class TestTjaMadsOnlyIndependence(unittest.TestCase):
     li = _decode_laneinfo(sends)
     assert len(li) == 1
     assert li[0]["TJA"] == 0
+    assert li[0]["TJA_TRANSITION"] == 2
+
+  def test_hud_stage2b_armed_white_matrix(self, alpha_long):
+    """Stage 2B: MADS ON + MRCC ARMED forces TJA=2. OFF/ACTIVE/MADS-off unchanged."""
+    # available, enabled, mads, fsc_tja, expected_tja
+    cases = (
+      (False, False, False, 0, 0),
+      (False, False, False, 2, 0),
+      (True, False, False, 0, 0),
+      (True, False, False, 2, 0),
+      (False, False, True, 0, 0),
+      (False, False, True, 2, 2),
+      (True, False, True, 0, 2),
+      (True, False, True, 2, 2),
+      (True, False, True, 3, 2),
+      (True, False, True, 4, 2),
+      (True, True, True, 0, 0),
+      (True, True, True, 2, 0),
+      (True, True, True, 3, 0),
+      (True, True, True, 4, 0),
+      (True, True, False, 2, 0),
+      (True, True, False, 3, 0),
+      (True, True, False, 4, 0),
+    )
+    for available, enabled, mads, fsc_tja, expected in cases:
+      ctrl = _controller(alpha_long)
+      cam = _laneinfo_tja(fsc_tja, transition=2)
+      cam["LANE_LINES"] = 3
+      kw = dict(available=available, enabled=enabled, mads_enabled=mads, cam_laneinfo=cam)
+      if enabled:
+        kw.update(cc_enabled=True, long_active=True)
+      crz, sends = _hud_step(ctrl, mads, **kw)
+      assert crz == [], (available, enabled, mads, fsc_tja)
+      li = _decode_laneinfo(sends)
+      assert len(li) == 1
+      assert li[0]["TJA"] == expected, (available, enabled, mads, fsc_tja, li[0]["TJA"])
+      assert li[0]["TJA_TRANSITION"] == 2
+      assert li[0]["LANE_LINES"] == 3
+      assert not any(a == CRZ_EVENTS for a, _, _ in sends)
+      assert any(a == CAM_LKAS for a, _, _ in sends)
+
+  def test_hud_stage2b_does_not_change_crz_or_lkas(self, alpha_long):
+    cam = _laneinfo_tja(0, transition=2)
+    cam["LANE_LINES"] = 3
+    kw = dict(available=True, enabled=False, cam_laneinfo=cam)
+    crz_off, sends_off = _hud_step(_controller(alpha_long), False, mads_enabled=False, **kw)
+    crz_on, sends_on = _hud_step(_controller(alpha_long), False, mads_enabled=True, **kw)
+    assert crz_off == []
+    assert crz_on == []
+    addrs_off = sorted((a, b) for a, _, b in sends_off)
+    addrs_on = sorted((a, b) for a, _, b in sends_on)
+    assert addrs_off == addrs_on
+    for addr in (CAM_LKAS, CRZ_BTNS, CRZ_INFO, CRZ_CTRL, CRZ_EVENTS):
+      off = [dat for a, dat, _ in sends_off if a == addr]
+      on = [dat for a, dat, _ in sends_on if a == addr]
+      assert off == on, hex(addr)
+    li_off = _decode_laneinfo(sends_off)
+    li_on = _decode_laneinfo(sends_on)
+    assert li_off[0]["TJA"] == 0
+    assert li_on[0]["TJA"] == 2
+    assert li_off[0]["TJA_TRANSITION"] == li_on[0]["TJA_TRANSITION"] == 2
+
+  def test_hud_stage2b_off_to_armed_sets_tja2(self, alpha_long):
+    ctrl = _controller(alpha_long)
+    cam = _laneinfo_tja(0, transition=2)
+    crz, sends = _hud_step(ctrl, True, mads_enabled=True, available=False, enabled=False,
+                           cam_laneinfo=cam)
+    assert crz == []
+    assert _decode_laneinfo(sends)[0]["TJA"] == 0
+    crz, sends = _hud_step(ctrl, True, mads_enabled=True, available=True, enabled=False,
+                           cam_laneinfo=cam)
+    assert crz == []
+    li = _decode_laneinfo(sends)
+    assert li[0]["TJA"] == 2
+    assert li[0]["TJA_TRANSITION"] == 2
+    assert not any(a in (CRZ_BTNS, CRZ_EVENTS) for a, _, _ in sends)
+
+  def test_hud_stage2b_armed_to_active_clamps_tja0(self, alpha_long):
+    ctrl = _controller(alpha_long)
+    cam = _laneinfo_tja(2, transition=2)
+    crz, sends = _hud_step(ctrl, True, mads_enabled=True, available=True, enabled=False,
+                           cam_laneinfo=cam)
+    assert crz == []
+    assert _decode_laneinfo(sends)[0]["TJA"] == 2
+    crz, sends = _hud_step(ctrl, True, mads_enabled=True, available=True, enabled=True,
+                           cc_enabled=True, long_active=True, cam_laneinfo=cam)
+    assert crz == []
+    li = _decode_laneinfo(sends)
+    assert li[0]["TJA"] == 0
+    assert li[0]["TJA_TRANSITION"] == 2
+    assert not any(a == CRZ_EVENTS for a, _, _ in sends)
+
+  def test_hud_stage2b_active_to_armed_sets_tja2(self, alpha_long):
+    ctrl = _controller(alpha_long)
+    cam = _laneinfo_tja(0, transition=2)
+    crz, sends = _hud_step(ctrl, True, mads_enabled=True, available=True, enabled=True,
+                           cc_enabled=True, long_active=True, cam_laneinfo=cam)
+    assert crz == []
+    assert _decode_laneinfo(sends)[0]["TJA"] == 0
+    crz, sends = _hud_step(ctrl, True, mads_enabled=True, available=True, enabled=False,
+                           cam_laneinfo=cam)
+    assert crz == []
+    li = _decode_laneinfo(sends)
+    assert li[0]["TJA"] == 2
+    assert li[0]["TJA_TRANSITION"] == 2
+    assert not any(a in (CRZ_BTNS, CRZ_EVENTS) for a, _, _ in sends)
+
+  def test_hud_stage2b_tja_disables_mads_while_armed(self, alpha_long):
+    ctrl = _controller(alpha_long)
+    cam = _laneinfo_tja(0, transition=2)
+    crz, sends = _hud_step(ctrl, True, mads_enabled=True, available=True, enabled=False,
+                           cam_laneinfo=cam)
+    assert crz == []
+    assert _decode_laneinfo(sends)[0]["TJA"] == 2
+    crz, _ = _tja_press(ctrl, False, tja=1, available=True, enabled=False,
+                        pre_available=True, pre_enabled=False, cam_laneinfo=cam)
+    assert crz == []
+    crz, sends = _hud_step(ctrl, False, mads_enabled=False, available=True, enabled=False,
+                           cam_laneinfo=cam)
+    assert crz == []
+    li = _decode_laneinfo(sends)
+    assert li[0]["TJA"] == 0
+    assert li[0]["TJA_TRANSITION"] == 2
+
+  def test_hud_stage2b_tja_enables_mads_while_armed(self, alpha_long):
+    ctrl = _controller(alpha_long)
+    cam = _laneinfo_tja(0, transition=2)
+    crz, sends = _hud_step(ctrl, False, mads_enabled=False, available=True, enabled=False,
+                           cam_laneinfo=cam)
+    assert crz == []
+    assert _decode_laneinfo(sends)[0]["TJA"] == 0
+    crz, _ = _tja_press(ctrl, True, tja=1, available=True, enabled=False,
+                        pre_available=True, pre_enabled=False, cam_laneinfo=cam)
+    assert crz == []
+    crz, sends = _hud_step(ctrl, True, mads_enabled=True, available=True, enabled=False,
+                           cam_laneinfo=cam)
+    assert crz == []
+    li = _decode_laneinfo(sends)
+    assert li[0]["TJA"] == 2
     assert li[0]["TJA_TRANSITION"] == 2
 
   def test_pre_active_12_events_never_tx_tja2(self, alpha_long):
