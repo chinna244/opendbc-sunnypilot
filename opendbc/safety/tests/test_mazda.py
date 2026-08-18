@@ -196,6 +196,38 @@ class TestMazdaSafety(common.CarSafetyTest, common.DriverTorqueSteeringSafetyTes
       else:
         self.assertEqual(orig_bit, fwd_bit, f"bit {bit} changed")
 
+  def test_fsc_tja_isolation_passthrough_when_mads_feature_disabled(self):
+    self.safety.set_mads_params(False, False, False)
+    self.safety.set_heartbeat_engaged_mads(True)
+    msg = self._lkas_button_msg(True)
+    orig, fwd = self._fwd_copy(0, msg)
+    self.assertEqual(self._TJA_MASK, orig[self._TJA_BYTE] & self._TJA_MASK)
+    self.assertEqual(orig, fwd)
+
+  def test_fsc_tja_isolation_strips_before_heartbeat_transition(self):
+    # MADS feature on, but openpilot heartbeat still reports not engaged.
+    self.safety.set_mads_params(True, False, False)
+    self.safety.set_heartbeat_engaged_mads(False)
+    self.assertTrue(self.safety.get_enable_mads())
+
+    pressed = self._lkas_button_msg(True)
+    orig, fwd = self._fwd_copy(0, pressed)
+    self._assert_only_tja_cleared(orig, fwd)
+
+    # Heartbeat catches up later; strip policy must not depend on it.
+    self.safety.set_heartbeat_engaged_mads(True)
+    orig, fwd = self._fwd_copy(0, pressed)
+    self._assert_only_tja_cleared(orig, fwd)
+
+  def test_fsc_tja_isolation_strips_with_stale_heartbeat_on_disable_edge(self):
+    # MADS feature on; runtime disengaged but heartbeat still reports engaged.
+    self.safety.set_mads_params(True, False, False)
+    self.safety.set_heartbeat_engaged_mads(True)
+
+    pressed = self._lkas_button_msg(True)
+    orig, fwd = self._fwd_copy(0, pressed)
+    self._assert_only_tja_cleared(orig, fwd)
+
   def test_fsc_tja_isolation_panda_rx_sees_original_and_fwd_clears_tja(self):
     self.safety.set_mads_params(True, False, False)
     msg = self._lkas_button_msg(True)
@@ -221,6 +253,7 @@ class TestMazdaSafety(common.CarSafetyTest, common.DriverTorqueSteeringSafetyTes
     self.assertEqual(orig, fwd)
 
   def test_fsc_tja_isolation_preserves_set_res_cancel_mode_bits(self):
+    self.safety.set_mads_params(True, False, False)
     combos = (
       {"SET_P": 1, "SET_P_INV": 0},
       {"SET_M": 1, "SET_M_INV": 0},
@@ -237,6 +270,7 @@ class TestMazdaSafety(common.CarSafetyTest, common.DriverTorqueSteeringSafetyTes
       self._assert_only_tja_cleared(orig, fwd)
 
   def test_fsc_tja_isolation_reserved_bit_corpus(self):
+    self.safety.set_mads_params(True, False, False)
     rng = random.Random(47)
     for _ in range(256):
       dat = bytes(rng.getrandbits(8) for _ in range(8))

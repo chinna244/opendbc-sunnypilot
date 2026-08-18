@@ -253,10 +253,13 @@ static bool mazda_tx_hook(const CANPacket_t *msg) {
   return tx;
 }
 
-// Mutate only the bus0->bus2 forward copy of CRZ_BTNS. Panda RX and the OEM
-// body/MRCC keep the original bus0 frame, including physical TJA.
+// Mutate only the bus0->bus2 forward copy of CRZ_BTNS when the MADS feature is configured on.
+// Panda RX and the OEM body/MRCC keep the original bus0 frame, including physical TJA.
+// When MADS is disabled in params, pass TJA through so stock OEM behavior reaches the camera.
+// Gate on system_enabled (set via alternative experience), not heartbeat_engaged_mads, so button
+// edges are isolated before the USB heartbeat catches up with runtime MADS state.
 static void mazda_fwd_modify(int bus_num, CANPacket_t *msg) {
-  if ((bus_num == MAZDA_MAIN) && (msg->addr == MAZDA_CRZ_BTNS) && (GET_LEN(msg) >= 2U)) {
+  if (m_mads_state.system_enabled && (bus_num == MAZDA_MAIN) && (msg->addr == MAZDA_CRZ_BTNS) && (GET_LEN(msg) >= 2U)) {
     msg->data[MAZDA_TJA_BUTTON_BIT / 8U] &= (uint8_t)~(1U << (MAZDA_TJA_BUTTON_BIT % 8U));
   }
 }
