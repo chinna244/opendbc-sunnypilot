@@ -11,6 +11,7 @@ FSC_SETTLE_FRAMES = int(CarControllerParams.FSC_SETTLE_T / DT_CTRL)
 STOCK_RADAR_ALIVE_FRAMES = int(CarControllerParams.STOCK_RADAR_ALIVE_T / DT_CTRL)
 STOCK_RADAR_GUARD_FRAMES = int(CarControllerParams.STOCK_RADAR_GUARD_T / DT_CTRL)
 CANCEL_CONTEXT_FRAMES = int(CarControllerParams.CANCEL_CONTEXT_T / DT_CTRL)
+CAM_LKAS_STALE_FRAMES = int(CarControllerParams.CAM_LKAS_TIMEOUT_T / DT_CTRL)
 
 
 class CarState(CarStateBase, CarStateExt):
@@ -43,8 +44,14 @@ class CarState(CarStateBase, CarStateExt):
     self.cam_laneinfo_seen = False
     self.fsc_settled_frames = 0
     self.cam_laneinfo_raw: bytes | None = None
+    self.cam_lkas_seen = False
+    self.cam_lkas_stale_frames = CAM_LKAS_STALE_FRAMES + 1
     # the body ECU has taken the standstill hold over and is holding the brakes itself
     self.brake_hold = False
+
+  @property
+  def cam_lkas_live(self) -> bool:
+    return self.cam_lkas_seen and self.cam_lkas_stale_frames <= CAM_LKAS_STALE_FRAMES
 
   @property
   def fsc_settled(self) -> bool:
@@ -148,7 +155,7 @@ class CarState(CarStateBase, CarStateExt):
       #  - After the radar has been silenced once, hearing it again is a genuine
       #    two-master conflict (dropped tester present, S3 recovery, or the ordered
       #    hand-back) and is a real accFaulted. The alpha-long toggle monitor relies on
-      #    exactly this edge as its "stock radar heard" acknowledgement.
+      #    exactly this edge as its "stock radar heard" acknowledgment.
       if len(cp.vl_all["CRZ_INFO"]["CTR1"]) > 0:
         self.stock_radar_silent_frames = 0
       else:
@@ -212,9 +219,16 @@ class CarState(CarStateBase, CarStateExt):
     self.crz_btns_counter = cp.vl["CRZ_BTNS"]["CTR"]
 
     # camera signals
+    if len(cp_cam.vl_all["CAM_LKAS"]["ERR_BIT_1"]) > 0:
+      self.cam_lkas_seen = True
+      self.cam_lkas_stale_frames = 0
+    elif self.cam_lkas_seen:
+      self.cam_lkas_stale_frames += 1
+
     self.cam_lkas = cp_cam.vl["CAM_LKAS"]
     self.cam_laneinfo = cp_cam.vl["CAM_LANEINFO"]
-    ret.steerFaultPermanent = cp_cam.vl["CAM_LKAS"]["ERR_BIT_1"] == 1
+    ret.steerFaultPermanent = (cp_cam.vl["CAM_LKAS"]["ERR_BIT_1"] == 1 or
+                               cp_cam.vl["CAM_LKAS"]["ERR_BIT_2"] == 1)
 
     # cruise control button events: distance, inc, dec, resume, cancel, TJA
     prev_distance_button = self.distance_button

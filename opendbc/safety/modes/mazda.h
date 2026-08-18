@@ -27,8 +27,10 @@
 #define MAZDA_CAM  2
 
 #define MAZDA_PARAM_LONGITUDINAL 1U
+#define MAZDA_PARAM_STEER_TO_ZERO 2U
 
 static bool mazda_longitudinal = false;
+static bool mazda_steer_to_zero = false;
 
 // With longitudinal control the stock radar is silenced and openpilot replays its frames,
 // so allowed tx patterns are pinned to byte-exact stock captures wherever possible.
@@ -147,12 +149,8 @@ static void mazda_rx_hook(const CANPacket_t *msg) {
 }
 
 static bool mazda_tx_hook(const CANPacket_t *msg) {
-  // Envelope sized for the CX-5 2022+ EPS, which the controller commands up to (max_torque 1200,
-  // driver_torque_multiplier 15 vs upstream stock 800/1). SafetyModel.mazda is per-brand and can't
-  // see the fingerprint/EPS, so these limits apply to every Mazda. Non-CX-5-EPS Mazdas self-cap
-  // lower in the controller (values.py gates the tune on minSteerSpeed == 0), so this is only a
-  // looser backstop for them — not a behavior change. Per-car gating would need a safety param.
-  const TorqueSteeringLimits MAZDA_STEERING_LIMITS = {
+  // Long limits unchanged; lateral envelope follows STEER_TO_ZERO in safetyParam.
+  const TorqueSteeringLimits MAZDA_STEERING_LIMITS_HIGH = {
     .max_torque = 1200,
     .max_rate_up = 12,
     .max_rate_down = 25,
@@ -161,6 +159,17 @@ static bool mazda_tx_hook(const CANPacket_t *msg) {
     .driver_torque_allowance = 15,
     .type = TorqueDriverLimited,
   };
+  const TorqueSteeringLimits MAZDA_STEERING_LIMITS_STOCK = {
+    .max_torque = 800,
+    .max_rate_up = 10,
+    .max_rate_down = 25,
+    .max_rt_delta = 384,
+    .driver_torque_multiplier = 1,
+    .driver_torque_allowance = 15,
+    .type = TorqueDriverLimited,
+  };
+  const TorqueSteeringLimits limits = mazda_steer_to_zero ? MAZDA_STEERING_LIMITS_HIGH :
+                                                        MAZDA_STEERING_LIMITS_STOCK;
 
   // CRZ_INFO.ACCEL_CMD is raw units of 0.001 m/s2 (offset removed below), so this is the
   // ISO window: 2.0 / -3.5 m/s2. Stock MRCC itself commands down to raw -3891 in lead stops.
@@ -178,7 +187,7 @@ static bool mazda_tx_hook(const CANPacket_t *msg) {
   if (main_bus && (msg->addr == MAZDA_LKAS)) {
     int desired_torque = (((msg->data[0] & 0x0FU) << 8) | msg->data[1]) - 2048U;
 
-    if (steer_torque_cmd_checks(desired_torque, -1, MAZDA_STEERING_LIMITS)) {
+    if (steer_torque_cmd_checks(desired_torque, -1, limits)) {
       tx = false;
     }
   }
@@ -301,6 +310,7 @@ static safety_config mazda_init(uint16_t param) {
   };
 
   mazda_longitudinal = GET_FLAG(param, MAZDA_PARAM_LONGITUDINAL);
+  mazda_steer_to_zero = GET_FLAG(param, MAZDA_PARAM_STEER_TO_ZERO);
   acc_main_on = false;
 
   return mazda_longitudinal ? BUILD_SAFETY_CFG(mazda_long_rx_checks, MAZDA_LONG_TX_MSGS) :

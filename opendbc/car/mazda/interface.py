@@ -47,6 +47,9 @@ class CarInterface(CarInterfaceBase):
 
     ret.alphaLongitudinalAvailable = candidate == CAR.MAZDA_CX5_2022
     ret.openpilotLongitudinalControl = alpha_long and ret.alphaLongitudinalAvailable
+    if steer_to_zero:
+      ret.safetyConfigs[0].safetyParam |= MazdaSafetyFlags.STEER_TO_ZERO.value
+
     if ret.openpilotLongitudinalControl:
       ret.safetyConfigs[0].safetyParam |= MazdaSafetyFlags.LONG.value
       # engagement stays with the car: the driver SETs on the wheel, the body ECU raises

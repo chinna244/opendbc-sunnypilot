@@ -31,7 +31,7 @@ class TestMazdaSafety(common.CarSafetyTest, common.DriverTorqueSteeringSafetyTes
   def setUp(self):
     self.packer = CANPackerSafety("mazda_2017")
     self.safety = libsafety_py.libsafety
-    self.safety.set_safety_hooks(CarParams.SafetyModel.mazda, 0)
+    self.safety.set_safety_hooks(CarParams.SafetyModel.mazda, MazdaSafetyFlags.STEER_TO_ZERO)
     self.safety.init_tests()
 
   def _torque_meas_msg(self, torque):
@@ -287,7 +287,7 @@ class TestMazdaLongitudinalSafety(TestMazdaSafety, common.LongitudinalAccelSafet
   def setUp(self):
     self.packer = CANPackerSafety("mazda_2017")
     self.safety = libsafety_py.libsafety
-    self.safety.set_safety_hooks(CarParams.SafetyModel.mazda, MazdaSafetyFlags.LONG)
+    self.safety.set_safety_hooks(CarParams.SafetyModel.mazda, MazdaSafetyFlags.LONG | MazdaSafetyFlags.STEER_TO_ZERO)
     self.safety.init_tests()
 
   def _pcm_status_msg(self, enable):
@@ -412,6 +412,27 @@ class TestMazdaLongitudinalSafety(TestMazdaSafety, common.LongitudinalAccelSafet
 
       self.safety.set_controls_allowed(True)
       self.assertTrue(self._tx(self._crz_ctrl_cmd_msg(True, bus)))
+
+
+class TestMazdaStockSteeringSafety(unittest.TestCase):
+  """Pre-2022 / stock EPS envelope: safety must reject CX-5 2022 torque without STEER_TO_ZERO."""
+
+  def setUp(self):
+    self.packer = CANPackerSafety("mazda_2017")
+    self.safety = libsafety_py.libsafety
+    self.safety.set_safety_hooks(CarParams.SafetyModel.mazda, 0)
+    self.safety.init_tests()
+
+  def _torque_cmd_msg(self, torque):
+    values = {"LKAS_REQUEST": torque}
+    return self.packer.make_can_msg_safety("CAM_LKAS", 0, values)
+
+  def _tx(self, msg):
+    return self.safety.safety_tx_hook(msg)
+
+  def test_high_torque_rejected_without_steer_to_zero(self):
+    self.safety.set_controls_allowed(True)
+    self.assertFalse(self._tx(self._torque_cmd_msg(900)))
 
 
 class TestMazdaIgnition(unittest.TestCase):

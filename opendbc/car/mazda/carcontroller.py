@@ -49,7 +49,7 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     # FSC ERR bits force FAULT (request 0). FSC LINE_NOT_VISIBLE is not a gate.
     # Internal ~50 ms CAM_LKAS settle zeros request; 0x440 stays an FSC copy.
     desired_torque = 0
-    fsc_ok = mazdacan.fsc_cam_lkas_allows_steer(CS.cam_lkas)
+    fsc_ok = CS.cam_lkas_live and mazdacan.fsc_cam_lkas_allows_steer(CS.cam_lkas)
     if CC.latActive and fsc_ok:
       new_torque = int(round(CC.actuators.torque * steer_max))
       desired_torque = apply_driver_steer_torque_limits(new_torque, self.apply_torque_last,
