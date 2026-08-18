@@ -204,21 +204,12 @@ class CarState(CarStateBase, CarStateExt):
         self.low_speed_alert = False
     ret.lowSpeedAlert = self.low_speed_alert
 
-    # Check if LKAS is disabled due to lack of driver torque when all other states indicate
-    # it should be enabled (steer lockout). Don't warn until we actually get lkas active
-    # and lose it again, i.e, after initial lkas activation
-    if self.CP.minSteerSpeed > 0:
-      ret.steerFaultTemporary = self.lkas_allowed_speed and lkas_blocked
-    else:
-      # CX-5 2022: EPS accepts steering at all speeds regardless of LKAS_BLOCK.
-      # Verified across 5.5M frames: LKAS_BLOCK never indicates a real steering failure.
-      ret.steerFaultTemporary = False
-
     self.acc_active_last = ret.cruiseState.enabled
 
     self.crz_btns_counter = cp.vl["CRZ_BTNS"]["CTR"]
 
-    # camera signals
+    # camera signals: update liveness before steerFaultTemporary so the alert matches
+    # the same control frame as cam_lkas_live / CarController torque gating.
     if len(cp_cam.vl_all["CAM_LKAS"]["ERR_BIT_1"]) > 0:
       self.cam_lkas_seen = True
       self.cam_lkas_stale_frames = 0
@@ -229,6 +220,18 @@ class CarState(CarStateBase, CarStateExt):
     self.cam_laneinfo = cp_cam.vl["CAM_LANEINFO"]
     ret.steerFaultPermanent = (cp_cam.vl["CAM_LKAS"]["ERR_BIT_1"] == 1 or
                                cp_cam.vl["CAM_LKAS"]["ERR_BIT_2"] == 1)
+
+    # Check if LKAS is disabled due to lack of driver torque when all other states indicate
+    # it should be enabled (steer lockout). Don't warn until we actually get lkas active
+    # and lose it again, i.e, after initial lkas activation
+    cam_lkas_lost = self.cam_lkas_seen and not self.cam_lkas_live
+    if self.CP.minSteerSpeed > 0:
+      ret.steerFaultTemporary = (self.lkas_allowed_speed and lkas_blocked) or cam_lkas_lost
+    else:
+      # CX-5 2022: EPS accepts steering at all speeds regardless of LKAS_BLOCK.
+      # Verified across 5.5M frames: LKAS_BLOCK never indicates a real steering failure.
+      # After the first CAM_LKAS, a stale camera stream is a temporary steering fault.
+      ret.steerFaultTemporary = cam_lkas_lost
 
     # cruise control button events: distance, inc, dec, resume, cancel, TJA
     prev_distance_button = self.distance_button

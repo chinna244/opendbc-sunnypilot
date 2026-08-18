@@ -701,3 +701,59 @@ class TestRadarSessionSequencing:
     # and settles back to silenced once quiet again
     sends = self._step(cc, stock_radar_alive=False, fsc_settled=True)
     assert SESSION_PROG_DAT not in self._uds(sends)
+
+
+def _lkas_request(dat):
+  cp = CANParser("mazda_2017", [("CAM_LKAS", float("nan"))], 0)
+  cp.update([(0, [(0x243, dat, 0)])])
+  return int(cp.vl["CAM_LKAS"]["LKAS_REQUEST"])
+
+
+class TestCamLkasTorqueGate:
+  """Stale CAM_LKAS must drop commanded torque on the wire, not only the liveness flag."""
+
+  @pytest.fixture
+  def cc(self):
+    CP = CarInterface.get_params(CAR.MAZDA_CX5_2022, {0: {}, 1: {}, 2: {}}, [], alpha_long=False,
+                                 is_release=False, docs=False)
+    CP_SP = CarInterface.get_params_sp(CP, CAR.MAZDA_CX5_2022, {0: {}, 1: {}, 2: {}}, [], False, False, False)
+    return CarController({Bus.pt: "mazda_2017"}, CP, CP_SP)
+
+  def test_stale_cam_lkas_sends_zero_torque(self, cc):
+    CC = structs.CarControl()
+    CC.latActive = True
+    CC.actuators.torque = 0.4
+    CC = CC.as_reader()
+    CC_SP = structs.CarControlSP()
+    CC_SP.mads.available = True
+    CC_SP.mads.enabled = True
+    CS = SimpleNamespace(
+      out=SimpleNamespace(vEgoRaw=12.0, steeringTorque=0, brakePressed=False),
+      cam_lkas_live=True,
+      cam_lkas={"ERR_BIT_1": 0, "ERR_BIT_2": 0, "LINE_NOT_VISIBLE": 0, "BIT_1": 1},
+      cam_laneinfo={"TJA": 0, "LANE_LINES": 1, "LINE_VISIBLE": 0,
+                    "LINE_NOT_VISIBLE": 1, "TJA_TRANSITION": 0},
+      cam_laneinfo_raw=None,
+      crz_btns_counter=0,
+      cancel_button=0,
+      tja_button=0,
+      accel_button=0,
+      decel_button=0,
+      lkas_allowed_speed=True,
+    )
+
+    now_ns = 0
+    saw_torque = False
+    for _ in range(20):
+      _, sends = cc.update(CC, CC_SP, CS, now_ns)
+      now_ns += int(DT_CTRL * 1e9)
+      dat = next(d for a, d, _b in sends if a == 0x243)
+      if _lkas_request(dat) != 0:
+        saw_torque = True
+        break
+    assert saw_torque
+
+    CS.cam_lkas_live = False
+    _, sends = cc.update(CC, CC_SP, CS, now_ns)
+    dat = next(d for a, d, _b in sends if a == 0x243)
+    assert _lkas_request(dat) == 0

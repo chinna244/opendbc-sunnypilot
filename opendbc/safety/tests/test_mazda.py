@@ -448,8 +448,14 @@ class TestMazdaLongitudinalSafety(TestMazdaSafety, common.LongitudinalAccelSafet
       self.assertTrue(self._tx(self._crz_ctrl_cmd_msg(True, bus)))
 
 
-class TestMazdaStockSteeringSafety(unittest.TestCase):
-  """Pre-2022 / stock EPS envelope: safety must reject CX-5 2022 torque without STEER_TO_ZERO."""
+class TestMazdaStockSteeringSafety(TestMazdaSafety):
+  """Pre-2022 / stock EPS envelope: 800 Nm, 10/25 rate, driver multiplier 1."""
+
+  MAX_RATE_UP = 10
+  MAX_RATE_DOWN = 25
+  MAX_TORQUE_LOOKUP = [0], [800]
+  DRIVER_TORQUE_FACTOR = 1
+  DRIVER_TORQUE_ALLOWANCE = 15
 
   def setUp(self):
     self.packer = CANPackerSafety("mazda_2017")
@@ -457,16 +463,16 @@ class TestMazdaStockSteeringSafety(unittest.TestCase):
     self.safety.set_safety_hooks(CarParams.SafetyModel.mazda, 0)
     self.safety.init_tests()
 
-  def _torque_cmd_msg(self, torque):
-    values = {"LKAS_REQUEST": torque}
-    return self.packer.make_can_msg_safety("CAM_LKAS", 0, values)
-
-  def _tx(self, msg):
-    return self.safety.safety_tx_hook(msg)
-
   def test_high_torque_rejected_without_steer_to_zero(self):
     self.safety.set_controls_allowed(True)
     self.assertFalse(self._tx(self._torque_cmd_msg(900)))
+
+  def test_stock_rate_up_rejected(self):
+    self.safety.set_controls_allowed(True)
+    self.safety.set_desired_torque_last(0)
+    self.assertTrue(self._tx(self._torque_cmd_msg(self.MAX_RATE_UP)))
+    self.safety.set_desired_torque_last(0)
+    self.assertFalse(self._tx(self._torque_cmd_msg(self.MAX_RATE_UP + 1)))
 
 
 class TestMazdaIgnition(unittest.TestCase):

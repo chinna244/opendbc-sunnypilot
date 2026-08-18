@@ -132,6 +132,24 @@ class TestIcbmEmission(unittest.TestCase):
       assert v["TJA_BUTTON"] == 0
       assert v["MODE_X"] == 0
       assert v["MODE_Y"] == 0
+      assert v["MODE_X_INV"] == 1
+      assert v["MODE_Y_INV"] == 1
+
+  def test_button_counter_evolves_and_mode_inv_tracks_wheel(self):
+    self.CS.crz_btns_counter = 7
+    self.CS.mode_x = 1
+    self.CS.mode_y = 0
+    _, payloads = self.run_frames([SendButtonState.increase] * 120, capture_payloads=True)
+    assert payloads
+    decoded = [self._decode_crz_btns(dat) for dat in payloads[:4]]
+    counters = [int(v["CTR"]) for v in decoded]
+    assert all(0 <= c <= 15 for c in counters)
+    assert len(set(counters)) > 1
+    for v in decoded:
+      assert v["MODE_X"] == 1
+      assert v["MODE_X_INV"] == 0
+      assert v["MODE_Y"] == 0
+      assert v["MODE_Y_INV"] == 1
 
   def test_direction_change_updates_button_bits(self):
     _, inc_payloads = self.run_frames([SendButtonState.increase] * 80, capture_payloads=True)
