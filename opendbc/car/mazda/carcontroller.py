@@ -5,8 +5,8 @@ from opendbc.car import Bus, make_tester_present_msg, rate_limit, structs, uds
 from opendbc.car.lateral import apply_driver_steer_torque_limits
 from opendbc.car.interfaces import CarControllerBase
 from opendbc.car.mazda import mazdacan
-from opendbc.car.mazda.longitudinal import (RADAR_ADDR, RadarSessionManager, RadarSessionState, StopAndGoStateMachine,
-                                            StopGoState, create_radar_session_msg)
+from opendbc.car.mazda.longitudinal import (RADAR_ADDR, RadarSessionManager, RadarSessionState, StandstillHold,
+                                            create_radar_session_msg)
 from opendbc.car.mazda.values import CarControllerParams, Buttons
 
 from opendbc.sunnypilot.car.mazda.icbm import IntelligentCruiseButtonManagementInterface
@@ -27,8 +27,7 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     self.apply_torque_last = 0
     self.packer = CANPacker(dbc_names[Bus.pt])
     self.brake_counter = 0
-    self.stop_and_go = StopAndGoStateMachine()
-    self.virtual_resume_latched = False
+    self.stop_and_go = StandstillHold()
     self.long_counter = 0
     self.radar_counter = 0
     self.radar_session = RadarSessionManager()
@@ -70,7 +69,6 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     self.lkas_tx_state = tx.state
     apply_torque = tx.apply_torque
 
-    virtual_resume_sent = False
     if CC.cruiseControl.cancel:
       # If brake is pressed, let us wait >70ms before trying to disable crz to avoid
       # a race condition with the stock system, where the second cancel from openpilot
@@ -83,18 +81,13 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
         can_sends.append(mazdacan.create_button_cmd(self.packer, self.CP, CS.crz_btns_counter, Buttons.CANCEL, CS))
     else:
       self.brake_counter = 0
-      if CC.cruiseControl.resume and self.frame % 5 == 0:
-        # Mazda Stop and Go requires a RES button (or gas) press if the car stops more than 3 seconds
-        # Send Resume button when planner wants car to move. With openpilot longitudinal the
-        # RES press asks the body ECU to leave its standstill hold; only meaningful from a stop.
-        if not self.CP.openpilotLongitudinalControl or CS.out.standstill:
-          can_sends.append(mazdacan.create_button_cmd(self.packer, self.CP, CS.crz_btns_counter, Buttons.RESUME, CS))
-          virtual_resume_sent = self.CP.openpilotLongitudinalControl
+      if self.resume_requested(CC, CS) and self.frame % 5 == 0:
+        can_sends.append(mazdacan.create_button_cmd(self.packer, self.CP, CS.crz_btns_counter, Buttons.RESUME, CS))
 
     self.apply_torque_last = apply_torque
 
     if self.CP.openpilotLongitudinalControl:
-      can_sends.extend(self.update_longitudinal(CC, CC_SP, CS, virtual_resume_sent))
+      can_sends.extend(self.update_longitudinal(CC, CC_SP, CS))
 
     # HUD: forward FSC CAM_LANEINFO at the stock ~2 Hz cadence (frame%50 @ 100 Hz).
     # Route 3F: do not accelerate 0x440 while MADS is active.
@@ -133,7 +126,20 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     self.frame += 1
     return new_actuators, can_sends
 
-  def update_longitudinal(self, CC, CC_SP, CS, virtual_resume_sent):
+  def resume_requested(self, CC, CS) -> bool:
+    """Mazda stop-and-go needs a RES press (or gas) to leave a hold more than a few seconds old.
+
+    Under openpilot longitudinal, ask for exactly as long as the plan is asking to move and the
+    car has not moved yet. CC.cruiseControl.resume is the wrong trigger for that: it keys on
+    cruiseState standstill, which drops for ~3 s after a press and so drops the request while
+    the car is still stopped (Toyota documents the same trap), and on the planner rather than on
+    the command, which puts the press out before we are commanding anything positive.
+    """
+    if not self.CP.openpilotLongitudinalControl:
+      return CC.cruiseControl.resume
+    return CC.longActive and CS.out.standstill and CC.actuators.accel > 0.
+
+  def update_longitudinal(self, CC, CC_SP, CS):
     can_sends = []
 
     # Radar session sequencing: hold off the teardown until the FSC's cold-boot
@@ -158,12 +164,6 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
         # keeps the radar in its diagnostic session, and with it the stock frames silenced
         can_sends.append(make_tester_present_msg(RADAR_ADDR, 0, suppress_response=True))
 
-    # only trust a virtual resume once a RES frame has actually gone out on the bus
-    if not CC.cruiseControl.resume or not CS.out.standstill:
-      self.virtual_resume_latched = False
-    elif virtual_resume_sent:
-      self.virtual_resume_latched = True
-
     stopping = CC.actuators.longControlState == LongCtrlState.stopping
     # A gas press is an override, not a disengagement. The command goes to zero as everywhere
     # else, but the engaged bits stay set off CC.enabled the way Honda drives ACC_CONTROL's
@@ -173,33 +173,36 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     gas_override = CC.enabled and (CC.cruiseControl.override or CS.out.gasPressed)
     long_engaged = CC.longActive or gas_override
     sm = self.stop_and_go
-    state = sm.update(long_engaged, stopping, CS.out.standstill,
-                      resume_pressed=bool(CS.resume_button),
-                      virtual_resume=self.virtual_resume_latched,
-                      gas_override=gas_override)
+    sm.update(long_engaged, stopping, CS.out.standstill, CC.actuators.accel, CS.brake_hold,
+              CC.hudControl.leadVisible)
 
     accel = 0.
     if CC.longActive:
       accel = float(np.clip(CC.actuators.accel, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX))
       # Slew limit the plan-following command. accel_last is tracked through overrides too, so
-      # taking control back when the driver lifts off ramps in instead of stepping. The hold and
-      # resume commands below are byte-exact stock replays and bypass the limit.
+      # taking control back when the driver lifts off ramps in instead of stepping.
       accel = rate_limit(accel, self.accel_last, CarControllerParams.ACCEL_WINDDOWN_LIMIT,
                          CarControllerParams.ACCEL_WINDUP_LIMIT)
-      if state == StopGoState.HOLD:
-        accel = CarControllerParams.ACCEL_HOLD
-      elif state in (StopGoState.HOLD_LATCHED, StopGoState.HOLD_PASSIVE):
+      if sm.car_has_hold:
+        # the body ECU is holding the brakes itself, so stop asking for them like stock does
         accel = CarControllerParams.ACCEL_HOLD_LATCHED
-      elif state == StopGoState.RESUMING:
-        # brake-release window: let the car creep off the hold, never brake into it
-        accel = max(accel, 0.)
     self.accel_last = accel
 
-    lead_visible = CC.hudControl.leadVisible
+    # The track slot and CRZ_CTRL's RADAR_HAS_LEAD have to agree: the camera cross-checks them,
+    # and advertising a lead on one but not the other latches an SCBS fault. A real lead is
+    # reported as measured; the hold falls back to a fabricated stopped one only for as long as
+    # it needs a lead to hold against, and never through the release.
+    has_lead = long_engaged and sm.radar_has_lead()
+    if not has_lead:
+      lead = None
+    elif sm.lead_visible and 0. < CC_SP.leadOne.dRel <= 255.875:
+      lead = (CC_SP.leadOne.dRel, CC_SP.leadOne.vRel)
+    else:
+      lead = (mazdacan.LEAD_TRACK_DIST, 0.)
+
     if radar_master and self.frame % CarControllerParams.RADAR_STEP == 0:
-      synthetic_lead = long_engaged and (lead_visible or state != StopGoState.CRUISING)
       for bus in LONG_BUSES:
-        can_sends.extend(mazdacan.create_radar_frames(bus, self.radar_counter, synthetic_lead))
+        can_sends.extend(mazdacan.create_radar_frames(bus, self.radar_counter, lead))
       self.radar_counter += 1
 
     if radar_master and self.frame % CarControllerParams.LONG_STEP == 0:
@@ -207,11 +210,9 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       # mirror the driver's distance setting on the dash; stock shows gap 2 by default
       gap = (int(CC.hudControl.leadDistanceBars) or 2) if (long_engaged or acc_available) else 0
       if long_engaged:
-        has_lead = sm.radar_has_lead(lead_visible)
-        phase = sm.ctrl_phase(lead_visible)
+        phase = sm.ctrl_phase()
         acc_active_2 = sm.acc_active_2
       else:
-        has_lead = False
         phase = 0
         acc_active_2 = False
       for bus in LONG_BUSES:

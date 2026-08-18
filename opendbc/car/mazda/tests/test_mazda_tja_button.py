@@ -12,10 +12,10 @@ import random
 import pytest
 
 from opendbc.can import CANPacker, CANParser
-from opendbc.car import gen_empty_fingerprint, structs
+from opendbc.car import DT_CTRL, gen_empty_fingerprint, structs
 from opendbc.car.mazda import mazdacan
 from opendbc.car.mazda.interface import CarInterface
-from opendbc.car.mazda.values import CAR, Buttons
+from opendbc.car.mazda.values import CAR, Buttons, CarControllerParams
 
 ButtonType = structs.CarState.ButtonEvent.Type
 
@@ -63,6 +63,10 @@ class ButtonHarness:
     self.ci = _ci(alpha_long=alpha_long)
     self.packer = CANPacker("mazda_2017")
     self.t = 0
+    if alpha_long:
+      # Op-long cruise available is gated on the two-master radar-silence latch.
+      for _ in range(int(CarControllerParams.STOCK_RADAR_GUARD_T / DT_CTRL) + 1):
+        self.step()
 
   def step(self, *, tja=0, acc_off=0, acc_active=0, set_p=0, set_m=0,
            res=0, can_off=0, mode_x=0, mode_y=0, crz_available=0, crz_active=0):

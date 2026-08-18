@@ -10,6 +10,7 @@ ButtonType = structs.CarState.ButtonEvent.Type
 FSC_SETTLE_FRAMES = int(CarControllerParams.FSC_SETTLE_T / DT_CTRL)
 STOCK_RADAR_ALIVE_FRAMES = int(CarControllerParams.STOCK_RADAR_ALIVE_T / DT_CTRL)
 STOCK_RADAR_GUARD_FRAMES = int(CarControllerParams.STOCK_RADAR_GUARD_T / DT_CTRL)
+CANCEL_CONTEXT_FRAMES = int(CarControllerParams.CANCEL_CONTEXT_T / DT_CTRL)
 
 
 class CarState(CarStateBase, CarStateExt):
@@ -37,9 +38,13 @@ class CarState(CarStateBase, CarStateExt):
     self.cruise_enabled = False
     self.brake_pressed_prev = False
     self.stock_radar_silent_frames = 0
+    self.radar_was_silenced = False
+    self.cancel_context_frames = 0
     self.cam_laneinfo_seen = False
     self.fsc_settled_frames = 0
     self.cam_laneinfo_raw: bytes | None = None
+    # the body ECU has taken the standstill hold over and is holding the brakes itself
+    self.brake_hold = False
 
   @property
   def fsc_settled(self) -> bool:
@@ -69,6 +74,7 @@ class CarState(CarStateBase, CarStateExt):
 
     can_gear = int(cp.vl["GEAR"]["GEAR"])
     ret.gearShifter = self.parse_gear_shifter(self.shifter_values.get(can_gear, None))
+    self.brake_hold = cp.vl["GEAR"]["BRAKE_HOLD"] == 1
 
     ret.genericToggle = bool(cp.vl["BLINK_INFO"]["HIGH_BEAMS"])
     ret.leftBlindspot = cp.vl["BSM"]["LEFT_BS_STATUS"] != 0
@@ -114,35 +120,62 @@ class CarState(CarStateBase, CarStateExt):
       acc_armed = cp.vl["PEDALS"]["ACC_OFF"] == 1
       acc_active = cp.vl["PEDALS"]["ACC_ACTIVE"] == 1
       brake_free = not ret.brakePressed and not self.brake_pressed_prev
+      # The brake hold below exists for brake-only PEDALS samples that arrive with both bits
+      # low mid-press. A wheel CANCEL is different: it turns the MRCC main state off for real,
+      # and it has to land even with the brake down -- holding through it kept lateral engaged
+      # against a cancel mashed under braking until the brake was released 4 s later (route
+      # 7f9e3ff336 t+484-488). The PEDALS reaction runs a few frames behind the button, so
+      # cancel context outlives the press by a moment.
+      if cp.vl["CRZ_BTNS"]["CAN_OFF"] == 1:
+        self.cancel_context_frames = CANCEL_CONTEXT_FRAMES
+      elif self.cancel_context_frames > 0:
+        self.cancel_context_frames -= 1
       if acc_armed or acc_active:
         self.cruise_available = True
-      elif brake_free:
+      elif brake_free or self.cancel_context_frames > 0:
         self.cruise_available = False
       if acc_armed or acc_active or self.cruise_enabled or brake_free:
         self.cruise_enabled = acc_active
-      ret.cruiseState.available = self.cruise_available
-      ret.cruiseState.enabled = self.cruise_enabled
 
-      # Two-master guard: while the stock radar still broadcasts CRZ_INFO (teardown pending
-      # or failed, or the radar recovered through its S3 timeout), our synthetic frames
-      # would fight it on the bus, so block longitudinal engagement until it has been
-      # silent for 1 second.
+      # Two-master guard: while the stock radar still broadcasts CRZ_INFO, our synthetic
+      # frames would fight it on the bus, so engagement stays blocked until it has been
+      # silent for 1 second. The block wears two different hats:
+      #  - Before the first teardown of the drive this is the expected boot phase (FSC
+      #    settle + UDS handover, ~10-15 s), not a fault. Holding availability low keeps
+      #    engagement out with at most a wrongCarMode no-entry toast; raising accFaulted
+      #    here showed a permanent "Cruise Fault: Restart the Car" on every start for a
+      #    condition that clears by itself.
+      #  - After the radar has been silenced once, hearing it again is a genuine
+      #    two-master conflict (dropped tester present, S3 recovery, or the ordered
+      #    hand-back) and is a real accFaulted. The alpha-long toggle monitor relies on
+      #    exactly this edge as its "stock radar heard" acknowledgement.
       if len(cp.vl_all["CRZ_INFO"]["CTR1"]) > 0:
         self.stock_radar_silent_frames = 0
       else:
         self.stock_radar_silent_frames += 1
-      ret.accFaulted = self.stock_radar_silent_frames < STOCK_RADAR_GUARD_FRAMES
+      silenced = self.stock_radar_silent_frames >= STOCK_RADAR_GUARD_FRAMES
+      ret.accFaulted = self.radar_was_silenced and not silenced
+      self.radar_was_silenced |= silenced
 
-      # FSC settle timer (the radar teardown gate): the camera broadcasts a
-      # boot-in-progress state on CAM_LANEINFO (NO_ERR_BIT + BIT2, pure boot markers
-      # clearing at 2.8-6.0 s and never set again while driving), then runs a
-      # radar-presence check in the following seconds. A latched fault (ERR_BIT) also
-      # shows the boot markers clear, so it must hold the timer at zero. The seen latch
-      # matters: before the first frame the parser reads all-zero, which would count as
-      # settled.
+      ret.cruiseState.available = self.cruise_available and self.radar_was_silenced
+      ret.cruiseState.enabled = self.cruise_enabled
+
+      # FSC settle timer (the radar teardown gate): the camera broadcasts a boot-in-progress
+      # state on CAM_LANEINFO (NO_ERR_BIT, a pure boot marker clearing at 2.8-6.0 s and never
+      # set again while driving), then runs a radar-presence check in the following seconds.
+      # A latched fault (ERR_BIT) also shows the boot marker clear, so it must hold the timer
+      # at zero. The seen latch matters: before the first frame the parser reads all-zero,
+      # which would count as settled.
+      #
+      # BIT2 used to gate this too. It is byte-identical to NO_ERR_BIT on every frame of the
+      # 40 alpha-long routes this was developed against, so it carried no information there,
+      # but another CX-5 2022 with identical camera firmware (GSH7-67XK2-U) cold-booted with
+      # BIT2 latched high and NO_ERR_BIT clear for a whole ignition cycle. That pinned the
+      # timer at zero, so the radar was never silenced and the two-master guard held
+      # accFaulted for the entire drive with nothing to tell the driver why.
       self.cam_laneinfo_seen |= len(cp_cam.vl_all["CAM_LANEINFO"]["LANE_LINES"]) > 0
       laneinfo = cp_cam.vl["CAM_LANEINFO"]
-      settled = self.cam_laneinfo_seen and not any(laneinfo[s] for s in ("NO_ERR_BIT", "BIT2", "ERR_BIT"))
+      settled = self.cam_laneinfo_seen and not any(laneinfo[s] for s in ("NO_ERR_BIT", "ERR_BIT"))
       self.fsc_settled_frames = self.fsc_settled_frames + 1 if settled else 0
     else:
       # TODO: the signal used for available seems to be the adaptive cruise signal, instead of the main on
