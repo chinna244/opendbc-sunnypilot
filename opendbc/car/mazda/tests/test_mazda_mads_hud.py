@@ -1,5 +1,6 @@
 """Experimental MADS GREEN HUD: default-off, family-gated, 2 Hz only."""
 
+import pytest
 from types import SimpleNamespace
 
 from opendbc.can import CANPacker, CANParser
@@ -9,6 +10,8 @@ from opendbc.car.mazda.carcontroller import CarController
 from opendbc.car.mazda.interface import CarInterface
 from opendbc.car.mazda.mazdacan import (HUD_GREEN, HUD_OFF, HUD_PASSTHROUGH, HUD_WHITE,
                                         OEM_LL1_HUD_FAMILY, OEM_LL1_HUD_GREEN, OEM_LL1_HUD_OFF,
+                                        OEM_LL1_HUD_OFF_TJA2, OEM_LL1_HUD_OFF_TJA3,
+                                        OEM_LL1_HUD_GREEN_VARIANTS,
                                         OEM_LL1_HUD_WHITE, STEER_ACTIVATION_HOLD_NS,
                                         create_alert_command)
 from opendbc.car.mazda.values import CAR
@@ -133,6 +136,53 @@ class TestFamilyGateUnit:
                                            fsc_raw=OEM_LL1_HUD_OFF, green_allowed=True)
     assert dat == OEM_LL1_HUD_GREEN
     assert mode == HUD_GREEN
+
+  # --- Route-4C TJA variant tests: param-off must be passthrough ---
+
+  @pytest.mark.parametrize("fsc_raw", [OEM_LL1_HUD_OFF_TJA2, OEM_LL1_HUD_OFF_TJA3])
+  def test_tja_variant_param_off_is_exact_passthrough(self, fsc_raw):
+    """Default-off regression: 0x0a/0x0c variants must be byte-exact passthrough when param=0."""
+    packer = CANPacker("mazda_2017")
+    _, dat, _, mode = create_alert_command(packer, {}, False, False, mads_enabled=True,
+                                           fsc_raw=fsc_raw,
+                                           green_hud_enabled=False, green_allowed=False)
+    assert dat == fsc_raw, f"expected passthrough of {fsc_raw.hex()}, got {dat.hex()}"
+    assert mode == HUD_PASSTHROUGH
+
+  @pytest.mark.parametrize("fsc_raw", [OEM_LL1_HUD_OFF_TJA2, OEM_LL1_HUD_OFF_TJA3])
+  def test_tja_variant_param_on_active_is_green(self, fsc_raw):
+    """Route-4C regression: 0x0a/0x0c → GREEN when param=1 and all guards pass."""
+    packer = CANPacker("mazda_2017")
+    _, dat, _, mode = create_alert_command(packer, {}, False, False, mads_enabled=True,
+                                           fsc_raw=fsc_raw,
+                                           green_hud_enabled=True, green_allowed=True)
+    assert dat == OEM_LL1_HUD_GREEN
+    assert mode == HUD_GREEN
+
+  @pytest.mark.parametrize("fsc_raw", [OEM_LL1_HUD_OFF_TJA2, OEM_LL1_HUD_OFF_TJA3])
+  def test_tja_variant_param_on_paused_is_white(self, fsc_raw):
+    """Param on but green_allowed=False (e.g. MADS paused): variants → WHITE."""
+    packer = CANPacker("mazda_2017")
+    _, dat, _, mode = create_alert_command(packer, {}, False, False, mads_enabled=True,
+                                           fsc_raw=fsc_raw,
+                                           green_hud_enabled=True, green_allowed=False)
+    assert dat == OEM_LL1_HUD_WHITE
+    assert mode == HUD_WHITE
+
+  @pytest.mark.parametrize("fsc_raw", [OEM_LL1_HUD_OFF_TJA2, OEM_LL1_HUD_OFF_TJA3])
+  def test_tja_variant_param_on_mads_off_is_off(self, fsc_raw):
+    """Param on but MADS disabled: variants → OFF."""
+    packer = CANPacker("mazda_2017")
+    _, dat, _, mode = create_alert_command(packer, {}, False, False, mads_enabled=False,
+                                           fsc_raw=fsc_raw,
+                                           green_hud_enabled=True, green_allowed=False)
+    assert dat == OEM_LL1_HUD_OFF
+    assert mode == HUD_OFF
+
+  def test_tja_variants_not_in_baseline_family(self):
+    """Structural: route-4C payloads must not be in the param-independent baseline family."""
+    for v in OEM_LL1_HUD_GREEN_VARIANTS:
+      assert v not in OEM_LL1_HUD_FAMILY, f"{v.hex()} must not be in OEM_LL1_HUD_FAMILY"
 
   def test_unknown_payload_passthrough_even_if_green_allowed(self):
     packer = CANPacker("mazda_2017")
@@ -340,3 +390,54 @@ class TestCaptured4bPayload:
     hud, _, _ = _drive_to_active(cc, CS)
     assert CS.cam_laneinfo_raw == ROUTE_4B_FSC_OFF
     assert hud == OEM_LL1_HUD_WHITE
+
+
+class TestCaptured4cVariants:
+  """Regression for route-4C TJA_TRANSITION=2/3 variants (0x0a, 0x0c).
+
+  With param off: byte-exact passthrough regardless of MADS state.
+  With param on + guards healthy: continuous GREEN (no blink).
+  """
+
+  @pytest.mark.parametrize("fsc_raw", list(OEM_LL1_HUD_GREEN_VARIANTS))
+  def test_param_off_variant_is_passthrough_not_white(self, fsc_raw):
+    """Default-off: variant must not be silently mapped to WHITE."""
+    cc = _cc(green=False)
+    CS = _cs(raw=fsc_raw)
+    now_ns = 0
+    huds_seen = set()
+    for _ in range(60):
+      sends, now_ns = _step(cc, CS, lat_active=True, mads_enabled=True, now_ns=now_ns)
+      h = _hud(sends)
+      if h is not None:
+        huds_seen.add(h)
+    assert all(h == fsc_raw for h in huds_seen), (
+      f"param-off variant {fsc_raw.hex()} was remapped: {[h.hex() for h in huds_seen]}")
+
+  @pytest.mark.parametrize("fsc_raw", list(OEM_LL1_HUD_GREEN_VARIANTS))
+  def test_param_on_variant_is_continuously_green(self, fsc_raw):
+    """Route-4C fix: variant stays GREEN continuously while guards are healthy (no blink)."""
+    cc = _cc(green=True)
+    CS = _cs(raw=fsc_raw)
+    hud, now_ns, _ = _drive_to_active(cc, CS)
+    assert hud == OEM_LL1_HUD_GREEN, f"first GREEN tick: got {hud.hex() if hud else None}"
+    # Run several more HUD ticks confirming no reversion to passthrough.
+    green_ticks = 0
+    for _ in range(200):
+      sends, now_ns = _step(cc, CS, now_ns=now_ns)
+      h = _hud(sends)
+      if h is not None:
+        assert h == OEM_LL1_HUD_GREEN, f"reverted to {h.hex()} after going GREEN"
+        green_ticks += 1
+      if green_ticks >= 3:
+        break
+    assert green_ticks >= 3, "never saw 3 consecutive GREEN ticks"
+
+  @pytest.mark.parametrize("fsc_raw", list(OEM_LL1_HUD_GREEN_VARIANTS))
+  def test_param_on_variant_mads_off_is_off(self, fsc_raw):
+    packer = CANPacker("mazda_2017")
+    _, dat, _, mode = create_alert_command(packer, {}, False, False, mads_enabled=False,
+                                           fsc_raw=fsc_raw,
+                                           green_hud_enabled=True, green_allowed=False)
+    assert dat == OEM_LL1_HUD_OFF
+    assert mode == HUD_OFF

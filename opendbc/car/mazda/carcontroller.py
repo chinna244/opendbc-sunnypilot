@@ -101,8 +101,9 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       ldw = CC.hudControl.visualAlert == VisualAlert.ldw
       steer_required = CC.hudControl.visualAlert == VisualAlert.steerRequired
       steer_required = steer_required and CS.lkas_allowed_speed
+      green_hud_enabled = bool(self.CP_SP.flags & MazdaFlagsSP.EXPERIMENTAL_MADS_GREEN_HUD)
       green_allowed = (
-        bool(self.CP_SP.flags & MazdaFlagsSP.EXPERIMENTAL_MADS_GREEN_HUD) and
+        green_hud_enabled and
         bool(CC_SP.mads.enabled) and
         bool(CC.latActive) and
         bool(CS.cam_lkas_live) and
@@ -115,6 +116,7 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
         mads_available=bool(CC_SP.mads.available),
         mads_enabled=bool(CC_SP.mads.enabled),
         fsc_raw=getattr(CS, "cam_laneinfo_raw", None),
+        green_hud_enabled=green_hud_enabled,
         green_allowed=green_allowed)
       if hud_mode != self.mads_hud_mode:
         # Trial diagnostics: carlog is forwarded into cloudlog/rlog by card.
