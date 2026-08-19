@@ -248,9 +248,16 @@ def create_steering_control(packer, CP, frame, apply_torque, lkas, tx_lnv: int |
 
 
 # Route 3C/41/42 OEM-observed LL1 OFF/WHITE pair. Differ only by TJA 0↔2.
+# Route 47 OEM-engaged GREEN: TJA=4 and LANE_LINES=2 together (never TJA=4 + LL=1).
 OEM_LL1_HUD_OFF = bytes.fromhex("4201000000001040")
 OEM_LL1_HUD_WHITE = bytes.fromhex("4201000020001040")
+OEM_LL1_HUD_GREEN = bytes.fromhex("4202000040001040")
 OEM_LL1_HUD_FAMILY = (OEM_LL1_HUD_OFF, OEM_LL1_HUD_WHITE)
+
+HUD_OFF = "OFF"
+HUD_WHITE = "WHITE"
+HUD_GREEN = "GREEN"
+HUD_PASSTHROUGH = "PASSTHROUGH"
 
 
 def _in_oem_ll1_off_white_family(cam_msg: dict) -> bool:
@@ -305,6 +312,7 @@ def suppress_steering_icon_hud(cam_msg: dict, mads_enabled: bool) -> dict:
   Incoming FSC in {4201000000001040, 4201000020001040}:
     MADS OFF → exact OEM OFF; MADS ON → exact OEM WHITE.
   Every other payload is returned intact (no LL<=1 generic rewrite, no GREEN).
+  GREEN is wire-level only, behind the experimental param and extra steering guards.
   """
   out = dict(cam_msg)
   if not _in_oem_ll1_off_white_family(out):
@@ -314,34 +322,40 @@ def suppress_steering_icon_hud(cam_msg: dict, mads_enabled: bool) -> dict:
   return out
 
 
-def _family_gated_mads_hud_dat(dat: bytes, mads_enabled: bool) -> bytes:
+def _family_gated_mads_hud_dat(dat: bytes, mads_enabled: bool, green_allowed: bool = False) -> tuple[bytes, str]:
   # Wire-level gate: only swap when the live 8-byte FSC frame is exactly the pair.
   if dat not in OEM_LL1_HUD_FAMILY:
-    return dat
-  return OEM_LL1_HUD_WHITE if mads_enabled else OEM_LL1_HUD_OFF
+    return dat, HUD_PASSTHROUGH
+  if not mads_enabled:
+    return OEM_LL1_HUD_OFF, HUD_OFF
+  if green_allowed:
+    return OEM_LL1_HUD_GREEN, HUD_GREEN
+  return OEM_LL1_HUD_WHITE, HUD_WHITE
 
 
 def create_alert_command(packer, cam_msg: dict, ldw: bool, steer_required: bool,
                          apply_torque: int = 0, cam_lkas: dict | None = None,
                          tx: LkasTx | None = None, mads_enabled: bool = True,
-                         mads_available: bool = True, fsc_raw: bytes | None = None):
+                         mads_available: bool = True, fsc_raw: bytes | None = None,
+                         green_allowed: bool = False):
   # Family remap is allowed only when MADS is available AND the live FSC 0x440
   # 8-byte payload is exactly the proven OFF/WHITE pair. Named-signal equality
   # is not sufficient: DBC does not cover every bit.
+  # GREEN requires green_allowed (experimental param + steering guards).
   # `tx` / `ldw` / `steer_required` / apply_torque / cam_lkas kept for API compatibility.
   del apply_torque, cam_lkas, tx, ldw, steer_required
   raw = bytes(fsc_raw) if fsc_raw is not None else None
   if raw is not None and len(raw) == 8:
     if mads_available:
-      dat = _family_gated_mads_hud_dat(raw, mads_enabled)
+      dat, mode = _family_gated_mads_hud_dat(raw, mads_enabled, green_allowed)
     else:
-      dat = raw
-    return 0x440, dat, 0
+      dat, mode = raw, HUD_PASSTHROUGH
+    return 0x440, dat, 0, mode
   # No live payload (tests / pre-first-frame): pack named signals only. Never
-  # treat reconstructed equality as family membership.
+  # treat reconstructed equality as family membership. Never GREEN.
   values = {s: int(cam_msg.get(s, 0)) for s in CAM_LANEINFO_SIGNALS}
   addr, dat, bus = packer.make_can_msg("CAM_LANEINFO", 0, values)
-  return addr, bytes(dat), bus
+  return addr, bytes(dat), bus, HUD_PASSTHROUGH
 
 
 def create_button_cmd(packer, CP, counter, button, CS=None):

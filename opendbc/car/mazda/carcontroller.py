@@ -2,6 +2,7 @@ import numpy as np
 
 from opendbc.can import CANPacker
 from opendbc.car import Bus, make_tester_present_msg, rate_limit, structs, uds
+from opendbc.car.carlog import carlog
 from opendbc.car.lateral import apply_driver_steer_torque_limits
 from opendbc.car.interfaces import CarControllerBase
 from opendbc.car.mazda import mazdacan
@@ -10,6 +11,7 @@ from opendbc.car.mazda.longitudinal import (RADAR_ADDR, RadarSessionManager, Rad
 from opendbc.car.mazda.values import CarControllerParams, Buttons
 
 from opendbc.sunnypilot.car.mazda.icbm import IntelligentCruiseButtonManagementInterface
+from opendbc.sunnypilot.car.mazda.values import MazdaFlagsSP
 
 VisualAlert = structs.CarControl.HUDControl.VisualAlert
 LongCtrlState = structs.CarControl.Actuators.LongControlState
@@ -34,6 +36,8 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     self.accel_last = 0.
     self.lkas_handshake_start_ns = None
     self.lkas_tx_state = mazdacan.LKAS_TX_IDLE
+    self.mads_hud_mode = mazdacan.HUD_PASSTHROUGH
+    self.mads_hud_tx = b""
 
   def update(self, CC, CC_SP, CS, now_nanos):
     can_sends = []
@@ -91,16 +95,43 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
 
     # HUD: forward FSC CAM_LANEINFO at the stock ~2 Hz cadence (frame%50 @ 100 Hz).
     # Route 3F: do not accelerate 0x440 while MADS is active.
-    # Proven LL1 OFF/WHITE family: MADS master selects OFF vs WHITE. All else FSC intact.
+    # Proven LL1 OFF/WHITE family: MADS master selects OFF vs WHITE. GREEN is
+    # default-off experimental and only while actively steering on that family.
     if self.frame % 50 == 0:
       ldw = CC.hudControl.visualAlert == VisualAlert.ldw
       steer_required = CC.hudControl.visualAlert == VisualAlert.steerRequired
       steer_required = steer_required and CS.lkas_allowed_speed
-      can_sends.append(mazdacan.create_alert_command(self.packer, CS.cam_laneinfo, ldw, steer_required,
-                                                     apply_torque=apply_torque, cam_lkas=CS.cam_lkas, tx=tx,
-                                                     mads_available=bool(CC_SP.mads.available),
-                                                     mads_enabled=bool(CC_SP.mads.enabled),
-                                                     fsc_raw=getattr(CS, "cam_laneinfo_raw", None)))
+      green_allowed = (
+        bool(self.CP_SP.flags & MazdaFlagsSP.EXPERIMENTAL_MADS_GREEN_HUD) and
+        bool(CC_SP.mads.enabled) and
+        bool(CC.latActive) and
+        bool(CS.cam_lkas_live) and
+        fsc_ok and
+        tx.state == mazdacan.LKAS_TX_ACTIVE
+      )
+      addr, dat, bus, hud_mode = mazdacan.create_alert_command(
+        self.packer, CS.cam_laneinfo, ldw, steer_required,
+        apply_torque=apply_torque, cam_lkas=CS.cam_lkas, tx=tx,
+        mads_available=bool(CC_SP.mads.available),
+        mads_enabled=bool(CC_SP.mads.enabled),
+        fsc_raw=getattr(CS, "cam_laneinfo_raw", None),
+        green_allowed=green_allowed)
+      if hud_mode != self.mads_hud_mode:
+        # Trial diagnostics: carlog is forwarded into cloudlog/rlog by card.
+        # sendcan records the 0x440 bytes. CS.mads_hud_* are in-process only.
+        carlog.info("mads_hud %s->%s latActive=%s cam_lkas_live=%s tx=%s mads_enabled=%s dat=%s",
+                    self.mads_hud_mode, hud_mode, bool(CC.latActive),
+                    bool(CS.cam_lkas_live), tx.state, bool(CC_SP.mads.enabled), bytes(dat).hex())
+      self.mads_hud_mode = hud_mode
+      self.mads_hud_tx = bytes(dat)
+      # In-process diagnostics for unit tests. Not cereal; route logs use carlog + sendcan.
+      CS.mads_hud_mode = hud_mode
+      CS.mads_hud_tx = bytes(dat)
+      CS.mads_hud_lat_active = bool(CC.latActive)
+      CS.mads_hud_cam_lkas_live = bool(CS.cam_lkas_live)
+      CS.mads_hud_tx_state = tx.state
+      CS.mads_hud_mads_enabled = bool(CC_SP.mads.enabled)
+      can_sends.append((addr, dat, bus))
 
     # send steering command
     can_sends.append(mazdacan.create_steering_control(self.packer, self.CP,
