@@ -469,17 +469,18 @@ class TestFamilyGatedBinaryMadsHud:
   def _pack(self, lane, mads_enabled, fsc_raw=None):
     return _decode_440(_hud(lane, mads_enabled=mads_enabled, fsc_raw=fsc_raw))
 
-  def test_named_reconstruction_without_raw_does_not_remap(self):
+  def test_without_raw_nothing_is_sent(self):
+    """No live FSC payload means no 0x440 at all: never a reconstruction, never zeros."""
     packer = CANPacker("mazda_2017")
-    off = bytes(mazdacan.create_alert_command(
-      packer, self.FAMILY_OFF, False, False, mads_enabled=True)[1])
-    white = bytes(mazdacan.create_alert_command(
-      packer, self.FAMILY_WHITE, False, False, mads_enabled=False)[1])
-    assert off.hex() == self.OEM_OFF
-    assert white.hex() == self.OEM_WHITE
+    assert mazdacan.create_alert_command(
+      packer, self.FAMILY_OFF, False, False, mads_enabled=True) is None
+    assert mazdacan.create_alert_command(
+      packer, self.FAMILY_WHITE, False, False, mads_enabled=False) is None
+    # A malformed (non-8-byte) payload is also refused rather than padded or packed.
+    assert mazdacan.create_alert_command(
+      packer, self.FAMILY_OFF, False, False, mads_enabled=True, fsc_raw=b"\x42\x01\x00") is None
     assert self._raw(self.FAMILY_OFF, mads_enabled=False,
                      fsc_raw=bytes.fromhex(self.OEM_OFF)) == self.OEM_OFF
-    assert mazdacan.suppress_steering_icon_hud(self.FAMILY_OFF, False)["TJA"] == 0
 
   def test_b_family_off_mads_on_exact_white(self):
     assert self._raw(self.FAMILY_OFF, mads_enabled=True,
@@ -583,7 +584,8 @@ class TestFamilyGatedBinaryMadsHud:
       faulted = dict(base, ERR_BIT=1)
       raw = _lane_raw(faulted)
       assert raw.hex() != fsc_hex
-      assert not mazdacan._in_oem_ll1_off_white_family(faulted)
+      assert raw not in mazdacan.OEM_LL1_HUD_FAMILY
+      assert raw not in mazdacan.OEM_LL1_HUD_GREEN_VARIANTS
       dat = _hud(faulted, mads_enabled=mads, fsc_raw=raw)
       assert dat.hex() not in (self.OEM_OFF, self.OEM_WHITE)
       assert dat == raw

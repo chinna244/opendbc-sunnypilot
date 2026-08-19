@@ -40,6 +40,12 @@ class CarControllerParams:
   # check, float("nan") liveness leaves stale zeros looking healthy when 0x243 disappears.
   CAM_LKAS_TIMEOUT_T = 0.2
 
+  # FSC CAM_LANEINFO (0x440) runs at ~2 Hz, so it needs a much looser timeout than 0x243.
+  # Route 4C's widest normal gap between consecutive FSC frames was ~0.60 s; 1.5 s tolerates
+  # two consecutive misses without nuisance dropout. Once this expires the HUD is not sent
+  # at all, so the cluster falls back to showing nothing rather than a replayed stale frame.
+  CAM_LANEINFO_TIMEOUT_T = 1.5
+
   # A marginal vision lead flickers leadVisible faster than the camera can be shown a track
   # appearing and vanishing (route 6bb2dc61c4 t+400: 6 toggles in 1.4 s on a 120 m lead), so the
   # advertised lead only follows a state that has held steady, the way Hyundai debounces its

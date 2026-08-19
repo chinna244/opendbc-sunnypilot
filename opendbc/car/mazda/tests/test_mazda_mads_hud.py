@@ -33,10 +33,11 @@ def _cc(*, green=False, alpha_long=False):
   return CarController({Bus.pt: "mazda_2017"}, CP, CP_SP)
 
 
-def _cs(*, raw=ROUTE_4B_FSC_OFF, cam_lkas_live=True, err1=0, err2=0):
+def _cs(*, raw=ROUTE_4B_FSC_OFF, cam_lkas_live=True, cam_laneinfo_live=True, err1=0, err2=0):
   return SimpleNamespace(
     out=SimpleNamespace(vEgoRaw=12.0, steeringTorque=0, brakePressed=False),
     cam_lkas_live=cam_lkas_live,
+    cam_laneinfo_live=cam_laneinfo_live,
     cam_lkas={"ERR_BIT_1": err1, "ERR_BIT_2": err2, "LINE_NOT_VISIBLE": 0, "BIT_1": 1},
     cam_laneinfo={"TJA": 0, "LANE_LINES": 1, "LINE_VISIBLE": 0,
                   "LINE_NOT_VISIBLE": 1, "TJA_TRANSITION": 0},
@@ -191,12 +192,18 @@ class TestFamilyGateUnit:
     assert dat == BOOT_PAYLOAD
     assert mode == HUD_PASSTHROUGH
 
-  def test_no_raw_never_green(self):
+  def test_no_raw_sends_nothing(self):
     packer = CANPacker("mazda_2017")
-    _, dat, _, mode = create_alert_command(packer, {"TJA": 0, "LANE_LINES": 1}, False, False,
-                                           mads_enabled=True, fsc_raw=None, green_allowed=True)
-    assert mode == HUD_PASSTHROUGH
-    assert dat != OEM_LL1_HUD_GREEN
+    assert create_alert_command(packer, {"TJA": 0, "LANE_LINES": 1}, False, False,
+                                mads_enabled=True, fsc_raw=None, green_hud_enabled=True,
+                                green_allowed=True) is None
+
+  @pytest.mark.parametrize("bad", [b"", b"\x42", b"\x42\x01\x00\x00\x00\x00\x10",
+                                   b"\x42\x01\x00\x00\x00\x00\x10\x40\x00"])
+  def test_malformed_raw_sends_nothing(self, bad):
+    packer = CANPacker("mazda_2017")
+    assert create_alert_command(packer, {}, False, False, mads_enabled=True, fsc_raw=bad,
+                                green_hud_enabled=True, green_allowed=True) is None
 
 
 class TestParamDefaultOff:

@@ -36,7 +36,7 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     self.accel_last = 0.
     self.lkas_handshake_start_ns = None
     self.lkas_tx_state = mazdacan.LKAS_TX_IDLE
-    self.mads_hud_mode = mazdacan.HUD_PASSTHROUGH
+    self.mads_hud_mode = mazdacan.HUD_NOT_SENT
     self.mads_hud_tx = b""
 
   def update(self, CC, CC_SP, CS, now_nanos):
@@ -110,30 +110,41 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
         fsc_ok and
         tx.state == mazdacan.LKAS_TX_ACTIVE
       )
-      addr, dat, bus, hud_mode = mazdacan.create_alert_command(
-        self.packer, CS.cam_laneinfo, ldw, steer_required,
-        apply_torque=apply_torque, cam_lkas=CS.cam_lkas, tx=tx,
-        mads_available=bool(CC_SP.mads.available),
-        mads_enabled=bool(CC_SP.mads.enabled),
-        fsc_raw=getattr(CS, "cam_laneinfo_raw", None),
-        green_hud_enabled=green_hud_enabled,
-        green_allowed=green_allowed)
+      # Only speak for the camera while it is actually talking. Panda marks 0x440
+      # check_relay, so once the relay opens openpilot is the cluster's only source of
+      # this frame: sending a synthesized or replayed one would hide a dead FSC behind a
+      # healthy-looking HUD. create_alert_command returns None when there is nothing valid.
+      hud = None
+      if CS.cam_laneinfo_live:
+        hud = mazdacan.create_alert_command(
+          self.packer, CS.cam_laneinfo, ldw, steer_required,
+          apply_torque=apply_torque, cam_lkas=CS.cam_lkas, tx=tx,
+          mads_available=bool(CC_SP.mads.available),
+          mads_enabled=bool(CC_SP.mads.enabled),
+          fsc_raw=CS.cam_laneinfo_raw,
+          green_hud_enabled=green_hud_enabled,
+          green_allowed=green_allowed)
+
+      hud_mode = mazdacan.HUD_NOT_SENT if hud is None else hud[3]
       if hud_mode != self.mads_hud_mode:
         # Trial diagnostics: carlog is forwarded into cloudlog/rlog by card.
         # sendcan records the 0x440 bytes. CS.mads_hud_* are in-process only.
-        carlog.info("mads_hud %s->%s latActive=%s cam_lkas_live=%s tx=%s mads_enabled=%s dat=%s",
-                    self.mads_hud_mode, hud_mode, bool(CC.latActive),
-                    bool(CS.cam_lkas_live), tx.state, bool(CC_SP.mads.enabled), bytes(dat).hex())
+        carlog.info("mads_hud %s->%s latActive=%s cam_lkas_live=%s laneinfo_live=%s tx=%s mads_enabled=%s dat=%s",
+                    self.mads_hud_mode, hud_mode, bool(CC.latActive), bool(CS.cam_lkas_live),
+                    bool(CS.cam_laneinfo_live), tx.state, bool(CC_SP.mads.enabled),
+                    "" if hud is None else bytes(hud[1]).hex())
       self.mads_hud_mode = hud_mode
-      self.mads_hud_tx = bytes(dat)
+      self.mads_hud_tx = b"" if hud is None else bytes(hud[1])
       # In-process diagnostics for unit tests. Not cereal; route logs use carlog + sendcan.
       CS.mads_hud_mode = hud_mode
-      CS.mads_hud_tx = bytes(dat)
+      CS.mads_hud_tx = self.mads_hud_tx
       CS.mads_hud_lat_active = bool(CC.latActive)
       CS.mads_hud_cam_lkas_live = bool(CS.cam_lkas_live)
       CS.mads_hud_tx_state = tx.state
       CS.mads_hud_mads_enabled = bool(CC_SP.mads.enabled)
-      can_sends.append((addr, dat, bus))
+      if hud is not None:
+        addr, dat, bus, _ = hud
+        can_sends.append((addr, dat, bus))
 
     # send steering command
     can_sends.append(mazdacan.create_steering_control(self.packer, self.CP,

@@ -12,6 +12,7 @@ STOCK_RADAR_ALIVE_FRAMES = int(CarControllerParams.STOCK_RADAR_ALIVE_T / DT_CTRL
 STOCK_RADAR_GUARD_FRAMES = int(CarControllerParams.STOCK_RADAR_GUARD_T / DT_CTRL)
 CANCEL_CONTEXT_FRAMES = int(CarControllerParams.CANCEL_CONTEXT_T / DT_CTRL)
 CAM_LKAS_STALE_FRAMES = int(CarControllerParams.CAM_LKAS_TIMEOUT_T / DT_CTRL)
+CAM_LANEINFO_STALE_FRAMES = int(CarControllerParams.CAM_LANEINFO_TIMEOUT_T / DT_CTRL)
 
 
 class CarState(CarStateBase, CarStateExt):
@@ -44,6 +45,7 @@ class CarState(CarStateBase, CarStateExt):
     self.cam_laneinfo_seen = False
     self.fsc_settled_frames = 0
     self.cam_laneinfo_raw: bytes | None = None
+    self.cam_laneinfo_stale_frames = CAM_LANEINFO_STALE_FRAMES + 1
     self.cam_lkas_seen = False
     self.cam_lkas_stale_frames = CAM_LKAS_STALE_FRAMES + 1
     # the body ECU has taken the standstill hold over and is holding the brakes itself
@@ -52,6 +54,13 @@ class CarState(CarStateBase, CarStateExt):
   @property
   def cam_lkas_live(self) -> bool:
     return self.cam_lkas_seen and self.cam_lkas_stale_frames <= CAM_LKAS_STALE_FRAMES
+
+  @property
+  def cam_laneinfo_live(self) -> bool:
+    # Gates 0x440 transmission. openpilot is the only source of that frame to the cluster
+    # once the relay opens (panda check_relay), so a stale latch would otherwise replay a
+    # healthy-looking HUD indefinitely after the camera goes quiet.
+    return self.cam_laneinfo_seen and self.cam_laneinfo_stale_frames <= CAM_LANEINFO_STALE_FRAMES
 
   @property
   def fsc_settled(self) -> bool:
@@ -67,6 +76,15 @@ class CarState(CarStateBase, CarStateExt):
 
     ret = structs.CarState()
     ret_sp = structs.CarStateSP()
+
+    # CAM_LANEINFO liveness, updated before anything reads it so the FSC settle gate and the
+    # CarController HUD gate expire and recover on the same frame. Unconditional: the HUD path
+    # runs regardless of openpilotLongitudinalControl.
+    if len(cp_cam.vl_all["CAM_LANEINFO"]["LANE_LINES"]) > 0:
+      self.cam_laneinfo_seen = True
+      self.cam_laneinfo_stale_frames = 0
+    elif self.cam_laneinfo_seen:
+      self.cam_laneinfo_stale_frames += 1
 
     self.parse_wheel_speeds(ret,
       cp.vl["WHEEL_SPEEDS"]["FL"],
@@ -180,7 +198,6 @@ class CarState(CarStateBase, CarStateExt):
       # BIT2 latched high and NO_ERR_BIT clear for a whole ignition cycle. That pinned the
       # timer at zero, so the radar was never silenced and the two-master guard held
       # accFaulted for the entire drive with nothing to tell the driver why.
-      self.cam_laneinfo_seen |= len(cp_cam.vl_all["CAM_LANEINFO"]["LANE_LINES"]) > 0
       laneinfo = cp_cam.vl["CAM_LANEINFO"]
       settled = self.cam_laneinfo_seen and not any(laneinfo[s] for s in ("NO_ERR_BIT", "ERR_BIT"))
       self.fsc_settled_frames = self.fsc_settled_frames + 1 if settled else 0

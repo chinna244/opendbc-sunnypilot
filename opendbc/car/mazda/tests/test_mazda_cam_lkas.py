@@ -266,8 +266,11 @@ class TestCarControllerLnvCoherence:
 
   def test_controller_hud_stays_at_2hz_while_mads_active(self):
     # Route 3F: no 100 Hz CAM_LANEINFO while ACTIVE. frame%50 @ 100 Hz ≈ 2 Hz.
+    # The FSC 0x440 has to keep arriving for the HUD to be sent at all, so feed it
+    # alongside CAM_LKAS the way the camera does.
     packed = mazdacan.create_steering_control(self.packer, self.CP, 0, 0, _lkas(lnv=1))
     cam = CanData(packed[0], packed[1], 2)
+    laneinfo = CanData(0x440, mazdacan.OEM_LL1_HUD_OFF, 2)
     CC = structs.CarControl()
     CC.latActive = True
     CC.actuators.torque = 0.2
@@ -275,7 +278,7 @@ class TestCarControllerLnvCoherence:
     hud_count = 0
     for _ in range(100):
       self.t += 10_000_000
-      self.CI.update([(self.t, [cam])])
+      self.CI.update([(self.t, [cam, laneinfo])])
       _, sends = self.CI.apply(CC.as_reader(), CC_SP, self.t)
       hud_count += sum(1 for s in sends if s[0] == 0x440)
     assert hud_count == 2

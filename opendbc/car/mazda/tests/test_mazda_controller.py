@@ -730,6 +730,7 @@ class TestCamLkasTorqueGate:
     CS = SimpleNamespace(
       out=SimpleNamespace(vEgoRaw=12.0, steeringTorque=0, brakePressed=False),
       cam_lkas_live=True,
+      cam_laneinfo_live=False,  # no raw latched, so no 0x440 is expected
       cam_lkas={"ERR_BIT_1": 0, "ERR_BIT_2": 0, "LINE_NOT_VISIBLE": 0, "BIT_1": 1},
       cam_laneinfo={"TJA": 0, "LANE_LINES": 1, "LINE_VISIBLE": 0,
                     "LINE_NOT_VISIBLE": 1, "TJA_TRANSITION": 0},

@@ -267,31 +267,7 @@ HUD_OFF = "OFF"
 HUD_WHITE = "WHITE"
 HUD_GREEN = "GREEN"
 HUD_PASSTHROUGH = "PASSTHROUGH"
-
-
-def _in_oem_ll1_off_white_family(cam_msg: dict) -> bool:
-  if int(cam_msg.get("TJA", -1)) not in (0, 2):
-    return False
-  required = (
-    ("TJA_TRANSITION", 0),
-    ("LANE_LINES", 1),
-    ("LINE_VISIBLE", 0),
-    ("LINE_NOT_VISIBLE", 1),
-    ("BIT1", 1),
-    ("BIT2", 0),
-    ("BIT3", 1),
-    ("NO_ERR_BIT", 0),
-    ("S1", 1),
-    ("S1_HBEAM", 0),
-  )
-  for name, want in required:
-    if int(cam_msg.get(name, -1)) != want:
-      return False
-  for name in ("ERR_BIT", "HANDS_ON_STEER_WARN", "HANDS_ON_STEER_WARN_2",
-               "HANDS_WARN_3_BITS", "LDW_WARN_LL", "LDW_WARN_RL"):
-    if int(cam_msg.get(name, 0)) != 0:
-      return False
-  return True
+HUD_NOT_SENT = "NOT_SENT"  # no fresh FSC 0x440: nothing is transmitted this tick
 
 
 CAM_LANEINFO_SIGNALS = (
@@ -313,22 +289,6 @@ CAM_LANEINFO_SIGNALS = (
   "LDW_WARN_LL",
   "LDW_WARN_RL",
 )
-
-
-def suppress_steering_icon_hud(cam_msg: dict, mads_enabled: bool) -> dict:
-  """Family-gated binary MADS HUD for the proven LL1 OFF/WHITE pair only.
-
-  Incoming FSC in {4201000000001040, 4201000020001040}:
-    MADS OFF → exact OEM OFF; MADS ON → exact OEM WHITE.
-  Every other payload is returned intact (no LL<=1 generic rewrite, no GREEN).
-  GREEN is wire-level only, behind the experimental param and extra steering guards.
-  """
-  out = dict(cam_msg)
-  if not _in_oem_ll1_off_white_family(out):
-    return out
-  out["TJA"] = 2 if mads_enabled else 0
-  out["TJA_TRANSITION"] = 0
-  return out
 
 
 def _family_gated_mads_hud_dat(dat: bytes, mads_enabled: bool,
@@ -356,26 +316,34 @@ def create_alert_command(packer, cam_msg: dict, ldw: bool, steer_required: bool,
                          apply_torque: int = 0, cam_lkas: dict | None = None,
                          tx: LkasTx | None = None, mads_enabled: bool = True,
                          mads_available: bool = True, fsc_raw: bytes | None = None,
-                         green_hud_enabled: bool = False, green_allowed: bool = False):
-  # Family remap is allowed only when MADS is available AND the live FSC 0x440
-  # 8-byte payload is in the known-safe family. Named-signal equality is not
-  # sufficient: DBC does not cover every bit.
-  # green_hud_enabled: MazdaExperimentalMadsGreenHud param value (unlocks TJA variants).
-  # green_allowed: param + active steering/liveness/auth guards (enables GREEN output).
-  # `tx` / `ldw` / `steer_required` / apply_torque / cam_lkas kept for API compatibility.
-  del apply_torque, cam_lkas, tx, ldw, steer_required
-  raw = bytes(fsc_raw) if fsc_raw is not None else None
-  if raw is not None and len(raw) == 8:
-    if mads_available:
-      dat, mode = _family_gated_mads_hud_dat(raw, mads_enabled, green_hud_enabled, green_allowed)
-    else:
-      dat, mode = raw, HUD_PASSTHROUGH
-    return 0x440, dat, 0, mode
-  # No live payload (tests / pre-first-frame): pack named signals only. Never
-  # treat reconstructed equality as family membership. Never GREEN.
-  values = {s: int(cam_msg.get(s, 0)) for s in CAM_LANEINFO_SIGNALS}
-  addr, dat, bus = packer.make_can_msg("CAM_LANEINFO", 0, values)
-  return addr, bytes(dat), bus, HUD_PASSTHROUGH
+                         green_hud_enabled: bool = False,
+                         green_allowed: bool = False) -> tuple[int, bytes, int, str] | None:
+  """Build the outbound 0x440, or None when there is no valid live FSC payload to base it on.
+
+  Family remap is allowed only when MADS is available AND the live FSC 0x440 8-byte payload
+  is in the known-safe family. Named-signal equality is not sufficient: DBC does not cover
+  every bit, so the frame is never reconstructed from signals.
+
+  green_hud_enabled: MazdaExperimentalMadsGreenHud param value (unlocks the TJA variants).
+  green_allowed: param + active steering/liveness/auth guards (enables GREEN output).
+
+  Returning None means send nothing. openpilot is the only source of 0x440 to the cluster
+  once the relay opens, so before the first FSC frame (or after it goes stale) the cluster
+  must see no HUD rather than a synthesized or replayed one.
+  `packer` / `cam_msg` / `tx` / `ldw` / `steer_required` / apply_torque / cam_lkas kept for
+  API compatibility.
+  """
+  del packer, cam_msg, apply_torque, cam_lkas, tx, ldw, steer_required
+  if fsc_raw is None:
+    return None
+  raw = bytes(fsc_raw)
+  if len(raw) != 8:
+    return None
+  if mads_available:
+    dat, mode = _family_gated_mads_hud_dat(raw, mads_enabled, green_hud_enabled, green_allowed)
+  else:
+    dat, mode = raw, HUD_PASSTHROUGH
+  return 0x440, dat, 0, mode
 
 
 def create_button_cmd(packer, CP, counter, button, CS=None):
