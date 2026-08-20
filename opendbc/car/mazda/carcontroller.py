@@ -11,9 +11,6 @@ from opendbc.car.mazda.longitudinal import (RADAR_ADDR, RadarSessionManager, Rad
 from opendbc.car.mazda.values import CarControllerParams, Buttons
 
 from opendbc.sunnypilot.car.mazda.icbm import IntelligentCruiseButtonManagementInterface
-from opendbc.sunnypilot.car.mazda.values import MazdaFlagsSP
-
-VisualAlert = structs.CarControl.HUDControl.VisualAlert
 LongCtrlState = structs.CarControl.Actuators.LongControlState
 
 # Synthetic radar frames go to the car and to the camera; the panda only forwards
@@ -93,42 +90,21 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     if self.CP.openpilotLongitudinalControl:
       can_sends.extend(self.update_longitudinal(CC, CC_SP, CS))
 
-    # HUD: forward FSC CAM_LANEINFO at the stock ~2 Hz cadence (frame%50 @ 100 Hz).
-    # Route 3F: do not accelerate 0x440 while MADS is active.
-    # Proven LL1 OFF/WHITE family: MADS master selects OFF vs WHITE. GREEN is
-    # default-off experimental and only while actively steering on that family.
+    # The Mazda cluster HUD is FSC-owned. Relay its latest fresh CAM_LANEINFO
+    # byte-for-byte at the stock ~2 Hz cadence; never encode MADS/OP state in it.
     if self.frame % 50 == 0:
-      ldw = CC.hudControl.visualAlert == VisualAlert.ldw
-      steer_required = CC.hudControl.visualAlert == VisualAlert.steerRequired
-      steer_required = steer_required and CS.lkas_allowed_speed
-      green_hud_enabled = bool(self.CP_SP.flags & MazdaFlagsSP.EXPERIMENTAL_MADS_GREEN_HUD)
-      green_allowed = (
-        green_hud_enabled and
-        bool(CC_SP.mads.enabled) and
-        bool(CC.latActive) and
-        bool(CS.cam_lkas_live) and
-        fsc_ok and
-        tx.state == mazdacan.LKAS_TX_ACTIVE
-      )
       # Only speak for the camera while it is actually talking. Panda marks 0x440
       # check_relay, so once the relay opens openpilot is the cluster's only source of
       # this frame: sending a synthesized or replayed one would hide a dead FSC behind a
       # healthy-looking HUD. create_alert_command returns None when there is nothing valid.
       hud = None
       if CS.cam_laneinfo_live:
-        hud = mazdacan.create_alert_command(
-          self.packer, CS.cam_laneinfo, ldw, steer_required,
-          apply_torque=apply_torque, cam_lkas=CS.cam_lkas, tx=tx,
-          mads_available=bool(CC_SP.mads.available),
-          mads_enabled=bool(CC_SP.mads.enabled),
-          fsc_raw=CS.cam_laneinfo_raw,
-          green_hud_enabled=green_hud_enabled,
-          green_allowed=green_allowed)
+        hud = mazdacan.create_alert_command(self.packer, CS.cam_laneinfo, False, False,
+                                             fsc_raw=CS.cam_laneinfo_raw)
 
       hud_mode = mazdacan.HUD_NOT_SENT if hud is None else hud[3]
       if hud_mode != self.mads_hud_mode:
-        # Trial diagnostics: carlog is forwarded into cloudlog/rlog by card.
-        # sendcan records the 0x440 bytes. CS.mads_hud_* are in-process only.
+        # sendcan records the exact relayed 0x440 bytes for route verification.
         carlog.info("mads_hud %s->%s latActive=%s cam_lkas_live=%s laneinfo_live=%s tx=%s mads_enabled=%s dat=%s",
                     self.mads_hud_mode, hud_mode, bool(CC.latActive), bool(CS.cam_lkas_live),
                     bool(CS.cam_laneinfo_live), tx.state, bool(CC_SP.mads.enabled),

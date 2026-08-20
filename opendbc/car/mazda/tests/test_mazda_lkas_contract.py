@@ -111,7 +111,7 @@ class TestHandshakeStateMachine:
     assert tx.apply_torque == 0
     v243, v440 = _pack(tx)
     assert v243["LKAS_REQUEST"] == 0
-    assert v440["TJA"] == 2  # family OFF + default MADS ON → WHITE
+    assert v440["TJA"] == 0  # exact FSC HUD; MADS does not alter it
 
   def test_auth_enters_internal_settle_not_tja3(self):
     tx = _step(True, 0, start_ns=None, desired=400, fsc_lnv=1, fsc_tja=0)
@@ -124,7 +124,7 @@ class TestHandshakeStateMachine:
     v243, v440 = _pack(tx)
     assert v243["LKAS_REQUEST"] == 0
     assert v243["LINE_NOT_VISIBLE"] == 0
-    assert v440["TJA"] == 2  # family OFF + default MADS ON → WHITE, never TJA 3/4
+    assert v440["TJA"] == 0  # exact FSC HUD, never synthetic TJA 3/4
     assert v440["LANE_LINES"] == 1
 
   def test_transition_lasts_50ms_not_forever(self):
@@ -160,7 +160,7 @@ class TestHandshakeStateMachine:
     assert v243["LINE_NOT_VISIBLE"] == 0
     assert v243["LKAS_REQUEST"] == 537
     assert v243["ERR_BIT_1"] == 0
-    assert v440["TJA"] == 2  # family OFF + default MADS ON → WHITE, not GREEN
+    assert v440["TJA"] == 0  # exact FSC HUD, not WHITE/GREEN synthesis
     assert v440["LANE_LINES"] == 1
     assert v440["LINE_VISIBLE"] == 0
     assert v440["LINE_NOT_VISIBLE"] == 1
@@ -317,7 +317,7 @@ class TestOemHudOwnership:
                desired=163, fsc_lnv=1, fsc_tja=0, fsc_ll=1)
     _, v440 = _pack(tx)
     assert tx.state == LKAS_TX_ACTIVE
-    assert v440["TJA"] == 2  # family OFF + MADS ON → WHITE, not TJA=4
+    assert v440["TJA"] == 0  # exact FSC HUD, not TJA=4
     assert v440["LANE_LINES"] == 1
 
 
@@ -340,7 +340,7 @@ class TestHudOemCopyCases:
   def test_b_mads_active_fsc_tja0(self):
     tx = self._active(1, fsc_tja=0)
     _, v440 = _pack(tx)
-    assert v440["TJA"] == 2  # family OFF + default MADS ON → WHITE
+    assert v440["TJA"] == 0  # exact FSC HUD
     assert tx.apply_torque == 400
 
   def test_c_fsc_lane_line_changes_follow_exactly(self):
@@ -429,11 +429,7 @@ class TestStateFuzz:
                   assert tx.lane_lines == fsc_ll
                   assert tx.tja == fsc_tja
                   assert v440["LANE_LINES"] == fsc_ll
-                  family = fsc_tja in (0, 2) and fsc_ll == 1
-                  if family:
-                    assert v440["TJA"] == 2  # default mads_enabled=True
-                  else:
-                    assert v440["TJA"] == fsc_tja
+                  assert v440["TJA"] == fsc_tja
                   assert tx.send_hud_every_frame is False
                   if err1 or not lat:
                     assert wire == 0
@@ -446,8 +442,8 @@ class TestStateFuzz:
                     assert tx.state == LKAS_TX_FAULT
 
 
-class TestFamilyGatedBinaryMadsHud:
-  """Proven LL1 OFF/WHITE pair only. Do not generic-gate on LL or TJA."""
+class TestExactFscHudRelay:
+  """Every valid FSC payload is relayed byte-for-byte, independent of MADS."""
 
   FAMILY_OFF = {
     "TJA": 0, "TJA_TRANSITION": 0, "LANE_LINES": 1,
@@ -482,13 +478,13 @@ class TestFamilyGatedBinaryMadsHud:
     assert self._raw(self.FAMILY_OFF, mads_enabled=False,
                      fsc_raw=bytes.fromhex(self.OEM_OFF)) == self.OEM_OFF
 
-  def test_b_family_off_mads_on_exact_white(self):
+  def test_b_family_off_mads_on_stays_exact_off(self):
     assert self._raw(self.FAMILY_OFF, mads_enabled=True,
-                     fsc_raw=bytes.fromhex(self.OEM_OFF)) == self.OEM_WHITE
+                     fsc_raw=bytes.fromhex(self.OEM_OFF)) == self.OEM_OFF
 
-  def test_c_family_white_mads_off_exact_off(self):
+  def test_c_family_white_mads_off_stays_exact_white(self):
     assert self._raw(self.FAMILY_WHITE, mads_enabled=False,
-                     fsc_raw=bytes.fromhex(self.OEM_WHITE)) == self.OEM_OFF
+                     fsc_raw=bytes.fromhex(self.OEM_WHITE)) == self.OEM_WHITE
 
   def test_d_family_white_mads_on_exact_white(self):
     assert self._raw(self.FAMILY_WHITE, mads_enabled=True,
@@ -529,7 +525,7 @@ class TestFamilyGatedBinaryMadsHud:
     assert self._raw(self.TR_WARN, mads_enabled=False) == baseline
     assert self._raw(self.TR_WARN, mads_enabled=True) == baseline
 
-  def test_i_every_transformed_payload_is_proven_pair(self):
+  def test_i_no_payload_is_transformed(self):
     allowed = {self.OEM_OFF, self.OEM_WHITE}
     transformed = []
     for lane, fsc_hex in ((self.FAMILY_OFF, self.OEM_OFF), (self.FAMILY_WHITE, self.OEM_WHITE)):
@@ -538,8 +534,7 @@ class TestFamilyGatedBinaryMadsHud:
         assert out in allowed
         if out != fsc_hex:
           transformed.append(out)
-    assert transformed == [self.OEM_WHITE, self.OEM_OFF]
-    assert set(transformed) <= allowed
+    assert transformed == []
 
   def test_no_tja3_tja4_synthesis(self):
     for tja in (3, 4):
@@ -548,21 +543,21 @@ class TestFamilyGatedBinaryMadsHud:
         v = self._pack(lane, mads_enabled=mads)
         assert v["TJA"] == tja
 
-  def test_route41_parity_counterfactual(self):
+  def test_route41_is_exact_fsc_regardless_of_mads(self):
     seq = [
-      (True, 0, 2),   # MADS ON / FSC OFF → WHITE
-      (False, 2, 0),  # MADS OFF / FSC WHITE → OFF
-      (True, 0, 2),
-      (False, 2, 0),
+      (True, 0),
+      (False, 2),
+      (True, 0),
+      (False, 2),
     ]
-    for mads, fsc_tja, expect_tja in seq:
+    for mads, fsc_tja in seq:
       fsc_hex = self.OEM_OFF if fsc_tja == 0 else self.OEM_WHITE
       lane = dict(self.FAMILY_WHITE)
       lane["TJA"] = fsc_tja
       v = self._pack(lane, mads_enabled=mads, fsc_raw=bytes.fromhex(fsc_hex))
-      assert v["TJA"] == expect_tja
+      assert v["TJA"] == fsc_tja
       raw = self._raw(lane, mads_enabled=mads, fsc_raw=bytes.fromhex(fsc_hex))
-      assert raw == (self.OEM_WHITE if mads else self.OEM_OFF)
+      assert raw == fsc_hex
 
   def test_mads_unavailable_is_pure_fsc(self):
     cases = (

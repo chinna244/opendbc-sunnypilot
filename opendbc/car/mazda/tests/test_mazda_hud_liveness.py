@@ -45,13 +45,14 @@ class _Rig:
     self.t = 0
     self.lkas = _lkas_frame(self.packer, self.CP)
 
-  def step(self, *, laneinfo: bytes | None = None, lkas: bool = True, n: int = 1):
+  def step(self, *, laneinfo: bytes | None = None, lkas: bool = True,
+           lat_active: bool = False, mads_enabled: bool = False, n: int = 1):
     """Advance n control frames. Returns every 0x440 emitted across them."""
     CC = structs.CarControl()
-    CC.latActive = False
+    CC.latActive = lat_active
     CC_SP = structs.CarControlSP()
     CC_SP.mads.available = True
-    CC_SP.mads.enabled = False
+    CC_SP.mads.enabled = mads_enabled
     out = []
     for _ in range(n):
       self.t += 10_000_000
@@ -185,3 +186,13 @@ class TestPassthroughUnchanged:
     rig = _Rig()
     sent = rig.step(laneinfo=mazdacan.OEM_LL1_HUD_OFF, n=500)
     assert len(sent) == 10, "500 frames @ 100 Hz == 5 s == 10 HUD ticks"
+
+  @pytest.mark.parametrize("payload", [bytes.fromhex("4102000000001040"),
+                                        bytes.fromhex("4102000600001040"),
+                                        bytes.fromhex("4102000700001040"),
+                                        WARN_PAYLOAD])
+  def test_mads_steering_cannot_replace_real_fsc_lanes_or_warning(self, payload):
+    rig = _Rig()
+    sent = rig.step(laneinfo=payload, lat_active=True, mads_enabled=True, n=200)
+    assert sent
+    assert all(dat == payload for dat in sent)

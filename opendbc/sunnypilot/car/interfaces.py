@@ -19,7 +19,6 @@ from opendbc.car.toyota.values import ToyotaSafetyFlags
 from opendbc.sunnypilot.car.hyundai.enable_radar_tracks import enable_radar_tracks as hyundai_enable_radar_tracks
 from opendbc.sunnypilot.car.hyundai.longitudinal.helpers import LongitudinalTuningType
 from opendbc.sunnypilot.car.hyundai.values import HyundaiFlagsSP
-from opendbc.sunnypilot.car.mazda.values import MazdaFlagsSP
 from opendbc.sunnypilot.car.subaru.values_ext import SubaruFlagsSP, SubaruSafetyFlagsSP
 from opendbc.sunnypilot.car.tesla.values import MadsScreenButtonType, TeslaFlagsSP, TeslaSafetyFlagsSP
 from opendbc.sunnypilot.car.toyota.values import ToyotaFlagsSP
@@ -102,7 +101,6 @@ def setup_interfaces(CI, CP: structs.CarParams, CP_SP: structs.CarParamsSP,
   _initialize_radar_tracks(CP, CP_SP, can_recv, can_send)
   _initialize_stop_and_go(CP, CP_SP, params_dict)
   _initialize_toyota(CP, CP_SP, params_dict)
-  _initialize_mazda(CP, CP_SP, params_dict)
 
 
 def _initialize_custom_longitudinal_tuning(CI, CP: structs.CarParams, CP_SP: structs.CarParamsSP,
@@ -179,9 +177,3 @@ def _initialize_toyota(CP: structs.CarParams, CP_SP: structs.CarParamsSP, params
 
     if toyota_stop_and_go_hack and CP.openpilotLongitudinalControl:
       CP_SP.flags |= ToyotaFlagsSP.STOP_AND_GO_HACK.value
-
-
-def _initialize_mazda(CP: structs.CarParams, CP_SP: structs.CarParamsSP, params_dict: dict[str, str]) -> None:
-  if CP.brand == "mazda":
-    if int(params_dict.get("MazdaExperimentalMadsGreenHud", 0)) == 1:
-      CP_SP.flags |= MazdaFlagsSP.EXPERIMENTAL_MADS_GREEN_HUD.value
